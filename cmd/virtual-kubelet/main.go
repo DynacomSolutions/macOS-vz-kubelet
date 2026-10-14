@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/nodeauth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/nodehealth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
@@ -358,6 +359,10 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		}
 		// remove stale pod volumes but keep the directory itself (it may be a virtiofs share)
 		if err := volumes.PreparePodVolumesDir(podVolumesDir); err != nil {
+			return nil, nil, err
+		}
+
+		if _, err := envcfg.AllowedImagePrefixes(); err != nil {
 			return nil, nil, err
 		}
 
