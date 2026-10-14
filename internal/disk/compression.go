@@ -122,6 +122,7 @@ func WriteDigestFile(filePath string, d digest.Digest) error {
 
 // DecompressReader streams gzip data from r into the output file, skipping zero chunks
 // so the file stays sparse, and returns the digest of the uncompressed content.
+// A positive uncompressedSize also caps the bytes written.
 func DecompressReader(ctx context.Context, r io.Reader, outputFilePath string, uncompressedSize int64) (d digest.Digest, err error) {
 	// Create the output file for writing
 	outputFile, err := os.Create(outputFilePath)
@@ -141,6 +142,9 @@ func DecompressReader(ctx context.Context, r io.Reader, outputFilePath string, u
 	if err != nil {
 		return "", err
 	}
+	defer func() {
+		err = errors.Join(err, gz.Close())
+	}()
 
 	digester := digest.Canonical.Digester()
 	h := digester.Hash()
@@ -173,6 +177,11 @@ func DecompressReader(ctx context.Context, r io.Reader, outputFilePath string, u
 			}
 			chunk := buf[i:end]
 			i = end
+
+			// a registry-supplied size is only trusted as an upper bound (0 = unknown)
+			if uncompressedSize > 0 && offset+int64(len(chunk)) > uncompressedSize {
+				return "", fmt.Errorf("decompressed data exceeds declared size %d", uncompressedSize)
+			}
 
 			h.Write(chunk) // Write chunk to the hash writer
 

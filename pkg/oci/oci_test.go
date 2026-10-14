@@ -66,7 +66,7 @@ func TestPushAndFetch(t *testing.T) {
 		Digest:    testDigest,
 		Size:      int64(len(testContent)),
 		Annotations: map[string]string{
-			ocispec.AnnotationTitle: "test-file",
+			ocispec.AnnotationTitle: "disk.img",
 		},
 	}
 
@@ -106,7 +106,7 @@ func TestExists(t *testing.T) {
 		Digest:    testDigest,
 		Size:      int64(len(testContent)),
 		Annotations: map[string]string{
-			ocispec.AnnotationTitle: "test-file",
+			ocispec.AnnotationTitle: "disk.img",
 		},
 	}
 
@@ -238,7 +238,7 @@ func TestDuplicateName(t *testing.T) {
 		Digest:    testDigest,
 		Size:      int64(len(testContent)),
 		Annotations: map[string]string{
-			ocispec.AnnotationTitle: "test-file",
+			ocispec.AnnotationTitle: "disk.img",
 		},
 	}
 
@@ -257,10 +257,10 @@ func TestEventRecorderIntegration(t *testing.T) {
 	mockEventRecorder := mocks.NewEventRecorder(t)
 
 	// Setup mock expectations - use mock.Anything for context to avoid context matching issues
-	mockEventRecorder.On("FailedToValidateOCI", mock.Anything, "test-file").Return()
+	mockEventRecorder.On("FailedToValidateOCI", mock.Anything, "disk.img").Return()
 
 	// Create invalid file for validation failure
-	testFileName := filepath.Join(tempDir, "test-file")
+	testFileName := filepath.Join(tempDir, "disk.img")
 	err := os.WriteFile(testFileName, []byte("invalid content"), 0644)
 	require.NoError(t, err)
 
@@ -275,7 +275,7 @@ func TestEventRecorderIntegration(t *testing.T) {
 		Digest:    correctDigest,
 		Size:      int64(len("correct content")),
 		Annotations: map[string]string{
-			ocispec.AnnotationTitle: "test-file",
+			ocispec.AnnotationTitle: "disk.img",
 		},
 	}
 
@@ -383,7 +383,8 @@ func TestPushCompressedStreams(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, plain, got)
 		assert.FileExists(t, filepath.Join(dir, "disk.img.digest"))
-		assert.NoFileExists(t, filepath.Join(dir, "disk.img.partial"))
+		left, _ := filepath.Glob(filepath.Join(dir, "*.partial-*"))
+		assert.Empty(t, left)
 	})
 
 	t.Run("digest mismatch leaves no output", func(t *testing.T) {
@@ -394,6 +395,41 @@ func TestPushCompressedStreams(t *testing.T) {
 
 		err = store.Push(context.Background(), newDesc(digest.FromString("wrong")), bytes.NewReader(gz.Bytes()))
 		assert.ErrorContains(t, err, "digest mismatch")
-		assert.NoFileExists(t, filepath.Join(dir, "disk.img.partial"))
+		left, _ := filepath.Glob(filepath.Join(dir, "*.partial-*"))
+		assert.Empty(t, left)
 	})
+}
+
+// A registry-controlled title must never leave the cache directory.
+func TestUnsafeTitleRejected(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "cache")
+	require.NoError(t, os.MkdirAll(dir, os.ModePerm))
+	victim := filepath.Join(root, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
+
+	store, err := oci.New(dir, false, mocks.NewEventRecorder(t))
+	require.NoError(t, err)
+	defer handleCloseError(t, store.Close)
+
+	content := []byte("pwned")
+	for _, title := range []string{"../victim", "../../etc/x", "/etc/x", "sub/disk.img", "disk.img.digest", "other.img"} {
+		desc := ocispec.Descriptor{
+			MediaType:   string(oci.MediaTypeDiskImage),
+			Digest:      digest.FromBytes(content),
+			Size:        int64(len(content)),
+			Annotations: map[string]string{ocispec.AnnotationTitle: title},
+		}
+		err := store.Push(context.Background(), desc, bytes.NewReader(content))
+		assert.ErrorIs(t, err, oci.ErrInvalidTitle, title)
+		_, err = store.Exists(context.Background(), desc)
+		assert.ErrorIs(t, err, oci.ErrInvalidTitle, title)
+	}
+
+	got, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(got))
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing may be written")
 }

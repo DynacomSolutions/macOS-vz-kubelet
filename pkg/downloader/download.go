@@ -39,8 +39,9 @@ type Params struct {
 
 	// MinFreeBytes is the free-space floor on the cache volume; 0 disables the guard.
 	MinFreeBytes uint64
-	// InUse lists cached image directories that must never be evicted.
-	InUse []string
+	// InUse returns the cached image directories that must never be evicted; called
+	// under the guard lock so it is current at decision time.
+	InUse func() []string
 
 	MinRetryDelay time.Duration
 	MaxDelay      time.Duration
@@ -67,7 +68,11 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		params.MaxAttempts = DefaultMaxAttempts
 	}
 
-	imageDir := filepath.Join(params.StorePath, "blobs", convertToPath(params.Ref))
+	blobsRoot := filepath.Join(params.StorePath, "blobs")
+	imageDir := filepath.Join(blobsRoot, convertToPath(params.Ref))
+	if rel, relErr := filepath.Rel(blobsRoot, imageDir); relErr != nil || !filepath.IsLocal(rel) || rel == "." {
+		return cfg, fmt.Errorf("image reference %q maps outside the cache", params.Ref)
+	}
 	_, statErr := os.Stat(imageDir)
 	createdDir := statErr != nil // a failed pull must only remove a directory it created
 
@@ -146,12 +151,14 @@ func guardedPull(ctx context.Context, params Params, imageDir string, store *oci
 	if params.MinFreeBytes == 0 {
 		return pull(ctx, params.Ref, store, params.Credentials)
 	}
-	if err := ensureSpace(ctx, params, imageDir); err != nil {
+	release, err := ensureSpace(ctx, params, imageDir)
+	if err != nil {
 		return err
 	}
+	defer release()
 	pullCtx, stop := watchFreeSpace(ctx, params.StorePath, params.MinFreeBytes)
 	defer stop()
-	err := pull(pullCtx, params.Ref, store, params.Credentials)
+	err = pull(pullCtx, params.Ref, store, params.Credentials)
 	if cause := context.Cause(pullCtx); err != nil && errors.Is(cause, ErrInsufficientSpace) {
 		return cause
 	}

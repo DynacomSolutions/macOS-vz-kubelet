@@ -169,6 +169,9 @@ func (s *Store) Push(ctx context.Context, expected ocispec.Descriptor, content i
 		return ErrStoreClosed
 	}
 
+	if err = ValidateTitle(expected); err != nil {
+		return err
+	}
 	name := expected.Annotations[ocispec.AnnotationTitle]
 	if name == "" {
 		return s.memoryStore.Push(ctx, expected, content)
@@ -224,6 +227,9 @@ func (s *Store) Exists(ctx context.Context, target ocispec.Descriptor) (ok bool,
 	}
 
 	// check if the content exists on the disk and validate if it does
+	if err = ValidateTitle(target); err != nil {
+		return false, err
+	}
 	name := target.Annotations[ocispec.AnnotationTitle]
 	filePath := filepath.Join(s.workingDir, name)
 

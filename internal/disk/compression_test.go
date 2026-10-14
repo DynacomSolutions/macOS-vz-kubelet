@@ -161,3 +161,14 @@ func createTempFileWithContent(t *testing.T, content string) string {
 
 	return tmpfile.Name()
 }
+
+func TestDecompressReaderCapsOutputAtDeclaredSize(t *testing.T) {
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	_, err := w.Write(bytes.Repeat([]byte("a"), 1000))
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	_, err = disk.DecompressReader(context.Background(), &gz, filepath.Join(t.TempDir(), "out"), 10)
+	assert.ErrorContains(t, err, "exceeds declared size")
+}
