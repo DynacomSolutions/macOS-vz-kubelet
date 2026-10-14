@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
-	"github.com/Code-Hex/vz/v3"
 	vmdata "github.com/agoda-com/macOS-vz-kubelet/internal/data/vm"
-	"github.com/agoda-com/macOS-vz-kubelet/internal/node"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/execerror"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/sshconn"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
@@ -35,16 +35,19 @@ const (
 
 // VirtualMachineParams encapsulates the parameters required for creating a virtual machine.
 type VirtualMachineParams struct {
-	UID              string
-	Image            string
-	Namespace        string
-	Name             string
-	ContainerName    string
-	CPU              uint
-	MemorySize       uint64
-	Mounts           []volumes.Mount
-	Env              []corev1.EnvVar
-	PostStartAction  *resource.ExecAction
+	UID             string
+	Image           string
+	Namespace       string
+	Name            string
+	ContainerName   string
+	CPU             uint
+	MemorySize      uint64
+	Mounts          []volumes.Mount
+	Env             []corev1.EnvVar
+	PostStartAction *resource.ExecAction
+	// StopOnPostStart stops the VM from the host once the postStart hook exits and reports the
+	// hook's exit code (see resource.StopWhenPostStartExitsAnnotation).
+	StopOnPostStart  bool
 	IgnoreImageCache bool
 	RegistryCreds    resource.RegistryCredentials
 }
@@ -197,6 +200,9 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 
 	// Execute the post-start action
 	err = c.execPostStartAction(ctx, params.Namespace, params.Name, *params.PostStartAction)
+	if params.StopOnPostStart && !errors.Is(err, context.Canceled) {
+		c.stopAfterPostStart(ctx, params, err)
+	}
 	if err != nil {
 		// err propagates via the deferred finalizeVirtualMachineInfo to SetError -> State()=Failed
 		// regardless of the guard below; only the cluster event is suppressed on a mid-hook pod
@@ -212,6 +218,41 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 		i.Resource.SetPostStartFinishedAt(time.Now())
 		return i
 	})
+}
+
+// stopAfterPostStart records the hook's exit status and stops the VM from the host, then
+// frees its permit. The host-side stop is what makes Virtualization.framework release the VM
+// slot; a guest power-off from the hook would leak it on macOS 26.5.
+func (c *MacOSClient) stopAfterPostStart(ctx context.Context, params VirtualMachineParams, hookErr error) {
+	logger := log.G(ctx)
+	code, hasCode := hookExitStatus(hookErr)
+	info, _ := c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+		if hasCode {
+			i.Resource.SetHookExitCode(code)
+		}
+		return i
+	})
+	if instance := info.Resource.Instance(); instance != nil {
+		// The pod context may be cancelled by now; the stop must still happen.
+		if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
+			logger.WithError(err).Warn("Failed to stop virtual machine from the host after the postStart hook exited")
+		} else {
+			logger.Infof("postStart hook exited (status %d, known=%t): virtual machine stopped from the host", code, hasCode)
+		}
+	}
+	c.releasePermit(ctx, types.NamespacedName{Namespace: params.Namespace, Name: params.Name})
+}
+
+// hookExitStatus returns the exit status of a postStart hook result: 0 for success, the remote
+// status for an exit error, and false for anything else (timeout, transport failure).
+func hookExitStatus(err error) (int, bool) {
+	if err == nil {
+		return 0, true
+	}
+	if es, ok := errors.AsType[execerror.ExitStatusError](err); ok {
+		return es.ExitStatus(), true
+	}
+	return 0, false
 }
 
 // finalizeVirtualMachineInfo updates the virtual machine info with the final result of the creation process.
@@ -264,6 +305,10 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 		return nil
 	}
 
+	// Registered first so it runs last: once the entry is deleted and the stack frame is dead,
+	// let the Go finalizer release the VZVirtualMachine (Code-Hex/vz has no explicit release).
+	defer runtime.GC()
+
 	// Delete must execute before releasePermit (defers are LIFO).
 	// releasePermit handles the missing-entry case via non-blocking channel drain.
 	defer c.vms.Delete(namespace, name)
@@ -277,8 +322,7 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 		err = c.stopVirtualMachine(ctx, instance, namespace, name, gracePeriod)
 	}
 
-	// Close the persistent SSH connection after stopVirtualMachine (graceful
-	// shutdown SSHes over it).
+	// Close the persistent SSH connection after stopVirtualMachine.
 	if info.SSHConn != nil {
 		_ = info.SSHConn.Close()
 	}
@@ -294,64 +338,14 @@ func (c *MacOSClient) stopVirtualMachine(ctx context.Context, instance *vm.Virtu
 		"name":        name,
 		"gracePeriod": gracePeriod,
 	})
-	logger := log.G(ctx)
 	defer func() {
 		span.SetStatus(err)
 		span.End()
 	}()
 
-	// Attempt to send a graceful shutdown request, which unfortunately
-	// is unsupported by Virtualization.framework as of today.
-	if instance.State() == vz.VirtualMachineStateRunning && gracePeriod > 0 {
-		logger.Info("Stopping virtual machine gracefully")
-
-		stopCtx, cancel := context.WithTimeout(ctx, time.Duration(gracePeriod)*time.Second)
-		defer cancel()
-		if err := c.gracefulShutdown(stopCtx, instance, namespace, name); err != nil {
-			logger.WithError(err).Warn("Failed to gracefully shutdown VM, will force stop it instead")
-		}
-	}
-
+	// Always stop from the host, never via a guest shutdown: on macOS 26.5 Virtualization.framework
+	// only frees the active-VM slot for a host-side stop. gracePeriod is therefore unused.
 	return instance.Stop(ctx)
-}
-
-// gracefulShutdown attempts to gracefully shutdown the virtual machine.
-func (c *MacOSClient) gracefulShutdown(ctx context.Context, instance *vm.VirtualMachineInstance, namespace, name string) (err error) {
-	ctx, span := trace.StartSpan(ctx, "MacOSClient.gracefulShutdown")
-	ctx = span.WithFields(ctx, log.Fields{
-		"namespace": namespace,
-		"name":      name,
-	})
-	defer func() {
-		span.SetStatus(err)
-		span.End()
-	}()
-
-	gracefulShutdownCmd := []string{
-		"sh", "-c",
-		// Disable network interface and shutdown the VM in the background so ssh connection
-		// is not interrupted. This will not work if sudo requires a password.
-		"sudo -n true && ((nohup sudo ipconfig set en0 none; sudo shutdown -h now) > /dev/null 2>&1 & disown)",
-	}
-
-	err = c.ExecInVirtualMachine(ctx, namespace, name, gracefulShutdownCmd, node.DiscardingExecIO())
-	if err != nil {
-		return err
-	}
-
-	// Check instance.FinishedAt until it's not nil or context is done
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if instance.FinishedAt != nil {
-				return nil
-			}
-		}
-	}
 }
 
 // GetVirtualMachine retrieves the specified virtual machine.

@@ -64,6 +64,7 @@ type MacOSVirtualMachine struct {
 	instance            *vm.VirtualMachineInstance // The underlying virtual machine instance.
 	err                 error                      // Error state of the virtual machine.
 	postStartFinishedAt time.Time                  // set once postStart hook succeeds; zero = not finished
+	hookExitCode        *int                       // exit status of the postStart hook, when it exited with one
 }
 
 // NewMacOSVirtualMachine creates a new instance of MacOSVirtualMachine.
@@ -164,4 +165,14 @@ func (m *MacOSVirtualMachine) PostStartFinishedAt() *time.Time {
 // probe, plus the exec hook when one exists).
 func (m *MacOSVirtualMachine) SetPostStartFinishedAt(t time.Time) {
 	m.postStartFinishedAt = t
+}
+
+// HookExitCode returns the postStart hook's exit status, or nil if it did not exit with one.
+func (m *MacOSVirtualMachine) HookExitCode() *int {
+	return m.hookExitCode
+}
+
+// SetHookExitCode records the postStart hook's exit status.
+func (m *MacOSVirtualMachine) SetHookExitCode(code int) {
+	m.hookExitCode = &code
 }
