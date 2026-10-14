@@ -41,12 +41,15 @@ func CreateContainerMounts(ctx context.Context, podVolRoot string, container cor
 		}
 		// Iterate over the volume types we care about
 		if podVolSpec.HostPath != nil {
-			// create the host path if it doesn't exist
-			err := os.MkdirAll(podVolSpec.HostPath.Path, PodVolPerms)
+			hostPath, err := resolveHostPath(podVolSpec.HostPath.Path)
 			if err != nil {
-				return nil, fmt.Errorf("error making hostPath for path %s: %w", podVolSpec.HostPath.Path, err)
+				return nil, err
 			}
-			newMount.HostPath = podVolSpec.HostPath.Path
+			// only create the host path once it is known to be allowed
+			if err := os.MkdirAll(hostPath, PodVolPerms); err != nil {
+				return nil, fmt.Errorf("error making hostPath for path %s: %w", hostPath, err)
+			}
+			newMount.HostPath = hostPath
 		} else if podVolSpec.EmptyDir != nil {
 			// TODO: Currently ignores the SizeLimit
 			newMount.HostPath = filepath.Join(podVolRoot, mountSpec.Name)

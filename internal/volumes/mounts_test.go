@@ -14,7 +14,9 @@ import (
 )
 
 func TestCreateContainerMounts(t *testing.T) {
-	tempDir := t.TempDir()
+	tempDir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	t.Setenv(volumes.HostPathAllowlistEnv, tempDir)
 
 	tests := []struct {
 		name                string
@@ -42,7 +44,7 @@ func TestCreateContainerMounts(t *testing.T) {
 							Name: "test-volume",
 							VolumeSource: corev1.VolumeSource{
 								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/tmp/hostpath",
+									Path: filepath.Join(tempDir, "hostpath"),
 								},
 							},
 						},
@@ -52,7 +54,7 @@ func TestCreateContainerMounts(t *testing.T) {
 			expectedMounts: []volumes.Mount{
 				{
 					Name:          "test-volume",
-					HostPath:      "/tmp/hostpath",
+					HostPath:      filepath.Join(tempDir, "hostpath"),
 					ContainerPath: "/mnt/test",
 					ReadOnly:      false,
 				},
