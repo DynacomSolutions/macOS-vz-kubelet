@@ -246,3 +246,38 @@ func TestCreateVirtualizationGroup_AllowsUnqualifiedSidecarImageRef(t *testing.T
 	require.Len(t, fake.createdWith, 1)
 	assert.Equal(t, "sidecar", fake.createdWith[0].Name)
 }
+
+func TestCreateVirtualizationGroup_RejectsImageOutsideAllowedPrefixes(t *testing.T) {
+	t.Setenv("VZ_ALLOWED_IMAGE_PREFIXES", "registry.example.com/macos-vz/")
+	ctx := context.Background()
+	er := eventmocks.NewEventRecorder(t) // no events expected: nothing may be pulled
+	fake := &fakeContainersClient{}
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
+	c.ContainerClient = fake
+	creds := resource.NewRegistryCredentialStore(nil)
+
+	for name, images := range map[string][2]string{
+		"foreign macOS image": {"registry.example.com/other/x:1", ""},
+		"lookalike host":      {"registry.example.com.evil.io/macos-vz/x:1", ""},
+		"foreign sidecar":     {"registry.example.com/macos-vz/x:1", "redis:7"},
+	} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", UID: "uid-1"},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "macos", Image: images[0], Resources: validMacOSResources()},
+			}},
+		}
+		if images[1] != "" {
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: "sidecar", Image: images[1]})
+		}
+		err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
+		assert.True(t, errdefs.IsInvalidInput(err), "%s: want InvalidInput, got %v", name, err)
+		assert.ErrorContains(t, err, "VZ_ALLOWED_IMAGE_PREFIXES", name)
+
+		_, getErr := c.GetVirtualizationGroup(ctx, "default", "p")
+		assert.True(t, errdefs.IsNotFound(getErr), "%s: nothing may be registered", name)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.createdWith)
+}
