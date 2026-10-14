@@ -970,3 +970,51 @@ func TestPortForward(t *testing.T) {
 	assert.Error(t, err, "PortForward should return an error")
 	vzClient.AssertExpectations(t)
 }
+
+func TestCreatePod_TokenRequestBoundToPod(t *testing.T) {
+	custom := int64(600)
+	tests := []struct {
+		name         string
+		audience     string
+		expiry       *int64
+		wantAudience []string
+		wantExpiry   int64
+	}{
+		{name: "defaults", wantExpiry: 3607},
+		{name: "custom", audience: "aud", expiry: &custom, wantAudience: []string{"aud"}, wantExpiry: 600},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fakeClient := fake.NewClientset()
+			var got *authv1.TokenRequest
+			fakeClient.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				got = action.(k8stesting.CreateAction).GetObject().(*authv1.TokenRequest)
+				return true, &authv1.TokenRequest{Status: authv1.TokenRequestStatus{Token: "tok"}}, nil
+			})
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", UID: types.UID("uid-1")},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "tester",
+					Containers:         []corev1.Container{{Name: "c"}},
+					Volumes: []corev1.Volume{{Name: "v", VolumeSource: corev1.VolumeSource{
+						Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: tc.audience, ExpirationSeconds: tc.expiry},
+						}}},
+					}}},
+				},
+			}
+			vzClient := clientmocks.NewVzClientInterface(t)
+			vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "tok", mock.Anything, mock.Anything).Return(nil)
+			p, err := provider.NewMacOSVZProvider(ctx, vzClient, provider.MacOSVZProviderConfig{Platform: defaultPlatform, K8sClient: fakeClient})
+			require.NoError(t, err)
+			require.NoError(t, p.CreatePod(ctx, pod))
+
+			require.NotNil(t, got)
+			assert.Equal(t, &authv1.BoundObjectReference{APIVersion: "v1", Kind: "Pod", Name: "p", UID: "uid-1"}, got.Spec.BoundObjectRef)
+			assert.Equal(t, tc.wantAudience, got.Spec.Audiences)
+			require.NotNil(t, got.Spec.ExpirationSeconds)
+			assert.Equal(t, tc.wantExpiry, *got.Spec.ExpirationSeconds)
+		})
+	}
+}
