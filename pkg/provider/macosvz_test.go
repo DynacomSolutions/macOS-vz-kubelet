@@ -455,6 +455,42 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 	}
 }
 
+// The Node authorizer denies GET on serviceaccounts, so pull secrets come only from the Pod spec.
+func TestCreatePod_ImagePullSecretsNeverReadServiceAccount(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "default"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(
+			`{"auths":{"https://registry.example.com":{"auth":"` + base64.StdEncoding.EncodeToString([]byte("u:p-fixture-value")) + `"}}}`)},
+	})
+	fakeClient.PrependReactor("get", "serviceaccounts", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, assert.AnError
+	})
+
+	vzClient := clientmocks.NewVzClientInterface(t)
+	vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "", mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+		_, ok := store.ForImage("registry.example.com/app:1")
+		return ok
+	})).Return(nil)
+	p, err := provider.NewMacOSVZProvider(ctx, vzClient, provider.MacOSVZProviderConfig{
+		Platform: defaultPlatform, K8sClient: fakeClient, EventRecorder: event.LogEventRecorder{},
+	})
+	require.NoError(t, err)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "pull-secret"}},
+			Containers: []corev1.Container{{Name: "macos", Image: "registry.example.com/app:1", Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resourceapi.MustParse("1"), corev1.ResourceMemory: resourceapi.MustParse("256Mi")},
+			}}},
+		},
+	}
+	require.NoError(t, p.CreatePod(ctx, pod))
+	vzClient.AssertExpectations(t)
+}
+
 func TestUpdatePod(t *testing.T) {
 	ctx := context.Background()
 	vzClient := clientmocks.NewVzClientInterface(t)

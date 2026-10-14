@@ -38,28 +38,9 @@ func (p *MacOSVZProvider) resolveImagePullCredentials(ctx context.Context, pod *
 		secretRefs = append(secretRefs, ref)
 	}
 
-	saName := pod.Spec.ServiceAccountName
-	if saName == "" {
-		saName = "default"
-	}
-
-	sa, err := p.k8sClient.CoreV1().ServiceAccounts(pod.Namespace).Get(ctx, saName, metav1.GetOptions{})
-	switch {
-	case apierrors.IsNotFound(err):
-		return resource.RegistryCredentialStore{}, fmt.Errorf("service account %q not found: %w", saName, err)
-	case err != nil:
-		return resource.RegistryCredentialStore{}, fmt.Errorf("failed to fetch service account %q: %w", saName, err)
-	default:
-		// continue with resolved service account
-	}
-
-	for _, ref := range sa.ImagePullSecrets {
-		if _, ok := seen[ref.Name]; ok {
-			continue
-		}
-		seen[ref.Name] = struct{}{}
-		secretRefs = append(secretRefs, ref)
-	}
+	// Like the kubelet, use only pod.Spec.ImagePullSecrets: the ServiceAccount admission plugin
+	// already copied the ServiceAccount's pull secrets there, and the Node authorizer denies
+	// GET on serviceaccounts.
 
 	for _, ref := range secretRefs {
 		secret, err := p.k8sClient.CoreV1().Secrets(pod.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})

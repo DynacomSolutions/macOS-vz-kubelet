@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/nodeauth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/nodehealth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
@@ -42,6 +43,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -200,10 +202,14 @@ func withVersion(cfg *nodeutil.NodeConfig) error {
 	return nil
 }
 
+// attachRoutes is set by configureRoutes; nodeauth.NewNode calls it once the provider exists.
+var attachRoutes nodeauth.RouteAttacher
+
 func configureRoutes(cfg *nodeutil.NodeConfig) error {
 	mux := http.NewServeMux()
 	cfg.Handler = mux
-	return nodeutil.AttachProviderRoutes(mux)(cfg)
+	attachRoutes = nodeauth.ProviderRoutes(mux)
+	return nil
 }
 
 func withWebhookAuth(ctx context.Context, cfg *nodeutil.NodeConfig) error {
@@ -306,70 +312,72 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		}
 	}()
 
-	node, err := nodeutil.NewNode(nodeName,
-		func(cfg nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
-			if port := os.Getenv("KUBELET_PORT"); port != "" {
-				kubeletPort, err := strconv.ParseInt(port, 10, 32)
-				if err != nil {
-					return nil, nil, err
-				}
-				listenPort = int(kubeletPort)
-			}
-			platform, _, _, err := host.PlatformInformationWithContext(ctx)
+	node, err := nodeauth.NewNode(nodeName, func(cfg nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
+		if port := os.Getenv("KUBELET_PORT"); port != "" {
+			kubeletPort, err := strconv.ParseInt(port, 10, 32)
 			if err != nil {
 				return nil, nil, err
 			}
+			listenPort = int(kubeletPort)
+		}
+		platform, _, _, err := host.PlatformInformationWithContext(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
 
-			eventBroadcaster := record.NewBroadcaster()
-			eventBroadcaster.StartLogging(log.G(ctx).Infof)
-			eventBroadcaster.StartRecordingToSink(&corev1client.EventSinkImpl{Interface: c.CoreV1().Events(corev1.NamespaceAll)})
-			eventRecorder := event.NewKubeEventRecorder(
-				eventBroadcaster.NewRecorder(
-					scheme.Scheme,
-					corev1.EventSource{
-						Component: provider.ComponentName,
-						Host:      nodeName,
-					},
-				),
-			)
+		eventBroadcaster := record.NewBroadcaster()
+		eventBroadcaster.StartLogging(log.G(ctx).Infof)
+		eventBroadcaster.StartRecordingToSink(&corev1client.EventSinkImpl{Interface: c.CoreV1().Events(corev1.NamespaceAll)})
+		eventRecorder := event.NewKubeEventRecorder(
+			eventBroadcaster.NewRecorder(
+				scheme.Scheme,
+				corev1.EventSource{
+					Component: provider.ComponentName,
+					Host:      nodeName,
+				},
+			),
+		)
 
-			// Create a containerd client to manage non-macOS containers
-			// If unavailable - ignore, but warn the user that some features will be unavailable
-			dockerCl, err := createDockerClient(ctx)
-			if err != nil {
-				log.G(ctx).Warnf("failed to create docker client: %v; some features (like non-macOS containers) will be unavailable", err)
-			}
+		// Create a containerd client to manage non-macOS containers
+		// If unavailable - ignore, but warn the user that some features will be unavailable
+		dockerCl, err := createDockerClient(ctx)
+		if err != nil {
+			log.G(ctx).Warnf("failed to create docker client: %v; some features (like non-macOS containers) will be unavailable", err)
+		}
 
-			cachePath, err := os.UserCacheDir()
-			if err != nil {
-				return nil, nil, err
-			}
-			cachePath = filepath.Join(cachePath, appIdentifier)
+		cachePath, err := os.UserCacheDir()
+		if err != nil {
+			return nil, nil, err
+		}
+		cachePath = filepath.Join(cachePath, appIdentifier)
 
-			networkInterfaceIdentifier := os.Getenv("VZ_BRIDGE_INTERFACE")
-			vzClient := client.NewVzClientAPIs(ctx, eventRecorder, networkInterfaceIdentifier, cachePath, dockerCl)
+		networkInterfaceIdentifier := os.Getenv("VZ_BRIDGE_INTERFACE")
+		vzClient := client.NewVzClientAPIs(ctx, eventRecorder, networkInterfaceIdentifier, cachePath, dockerCl)
 
-			providerConfig := provider.MacOSVZProviderConfig{
-				NodeName:           nodeName,
-				Platform:           platform,
-				InternalIP:         os.Getenv("VKUBELET_POD_IP"),
-				DaemonEndpointPort: int32(listenPort),
+		providerConfig := provider.MacOSVZProviderConfig{
+			NodeName:           nodeName,
+			Platform:           platform,
+			InternalIP:         os.Getenv("VKUBELET_POD_IP"),
+			DaemonEndpointPort: int32(listenPort),
 
-				K8sClient:     c,
-				EventRecorder: eventRecorder,
-				PodsLister:    cfg.Pods,
-			}
-			p, err := provider.NewMacOSVZProvider(ctx, vzClient, providerConfig)
-			if err != nil {
-				return nil, nil, err
-			}
-			err = p.ConfigureNode(ctx, cfg.Node)
-			if err != nil {
-				return nil, nil, err
-			}
-			// Ready follows the Docker side-car daemon (e.g. a stopped Colima shows up as NotReady).
-			health := nodehealth.New(cfg.Node, dockerHealthCheck, dockerHealthInterval())
-			return p, health, nil
+			K8sClient:     c,
+			EventRecorder: eventRecorder,
+			PodsLister:    cfg.Pods,
+		}
+		p, err := provider.NewMacOSVZProvider(ctx, vzClient, providerConfig)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = p.ConfigureNode(ctx, cfg.Node)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Ready follows the Docker side-car daemon (e.g. a stopped Colima shows up as NotReady).
+		health := nodehealth.New(cfg.Node, dockerHealthCheck, dockerHealthInterval())
+		return p, health, nil
+	},
+		func(p nodeutil.Provider, cfg nodeutil.NodeConfig, pods corev1listers.PodLister) {
+			attachRoutes(p, cfg, pods)
 		},
 		func(cfg *nodeutil.NodeConfig) error {
 			return withClient(c, cfg)
