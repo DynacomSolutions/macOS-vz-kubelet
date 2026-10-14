@@ -60,7 +60,7 @@ func NewManager(eventRecorder event.EventRecorder, cachePath string) *Manager {
 func (m *Manager) SetInUse(f func() []string) { m.inUse = f }
 
 // inUseDirs returns the cache directories of every ref in use or being downloaded.
-func (m *Manager) inUseDirs() (dirs []string) {
+func (m *Manager) inUseDirs() (dirs []string) { // called under the guard lock, so current at decision time
 	var refs []string
 	if m.inUse != nil {
 		refs = m.inUse()
@@ -180,7 +180,7 @@ func (m *Manager) startDownload(ctx context.Context, state *state, ref string, i
 		IgnoreExisiting: ignoreExisting,
 		Credentials:     creds,
 		MinFreeBytes:    m.minFreeBytes,
-		InUse:           m.inUseDirs(),
+		InUse:           m.inUseDirs,
 	}, m.eventRecorder)
 
 	state.duration = time.Since(startTime)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
@@ -61,11 +62,22 @@ func (s *Store) processCompressedContent(ctx context.Context, expected ocispec.D
 	if err != nil {
 		return fmt.Errorf("invalid uncompressed size: %w", err)
 	}
+	if size <= 0 {
+		return fmt.Errorf("invalid uncompressed size %q: must be positive", uncompressedSize)
+	}
 
 	// Stream the download straight through gzip into a partial file next to the
 	// output, so peak extra disk is the uncompressed size only (no full compressed
 	// temp copy). The partial is renamed over the output only once both digests match.
-	partial := outputFilePath + ".partial"
+	tmp, err := os.CreateTemp(filepath.Dir(outputFilePath), filepath.Base(outputFilePath)+".partial-*")
+	if err != nil {
+		return fmt.Errorf("failed to create partial file: %w", err)
+	}
+	partial := tmp.Name()
+	if err = tmp.Close(); err != nil {
+		_ = os.Remove(partial)
+		return err
+	}
 	defer func() {
 		if err != nil {
 			_ = os.Remove(partial)

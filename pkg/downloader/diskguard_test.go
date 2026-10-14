@@ -46,7 +46,7 @@ func TestRemoveStale(t *testing.T) {
 		{Annotations: map[string]string{ocispec.AnnotationTitle: "stale.img"}},
 		{Annotations: map[string]string{ocispec.AnnotationTitle: "good.img"}},
 	}
-	for _, f := range []string{"stale.img", "stale.img.partial", "good.img", "good.img.digest"} {
+	for _, f := range []string{"stale.img", "stale.img.partial-abc", "good.img", "good.img.digest"} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600))
 	}
 	old := time.Now().Add(-time.Hour)
@@ -54,7 +54,7 @@ func TestRemoveStale(t *testing.T) {
 
 	removeStale(layers, dir, false)
 
-	for _, f := range []string{"stale.img", "stale.img.partial"} {
+	for _, f := range []string{"stale.img", "stale.img.partial-abc"} {
 		assert.NoFileExists(t, filepath.Join(dir, f))
 	}
 	for _, f := range []string{"good.img", "good.img.digest"} {
@@ -132,4 +132,42 @@ func dirs(es []cacheEntry) (out []string) {
 		out = append(out, e.dir)
 	}
 	return out
+}
+
+func TestListCacheImageDirsAreLeaves(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "reg", "repo")
+	inner := filepath.Join(outer, "tag")
+	require.NoError(t, os.MkdirAll(inner, os.ModePerm))
+	require.NoError(t, os.WriteFile(filepath.Join(outer, "disk.img"), make([]byte, 5000), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(inner, "disk.img"), make([]byte, 5000), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "stray"), make([]byte, 5000), 0o600))
+
+	got := listCache(root)
+	require.Len(t, got, 1, "the cache root and anything below an image dir are not entries")
+	assert.Equal(t, outer, got[0].dir)
+}
+
+func TestEvictDirKeepsNestedImage(t *testing.T) {
+	root := t.TempDir()
+	inner := filepath.Join(root, "tag")
+	require.NoError(t, os.MkdirAll(inner, os.ModePerm))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "disk.img"), []byte("x"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(inner, "disk.img"), []byte("x"), 0o600))
+
+	require.NoError(t, evictDir(root))
+
+	assert.NoFileExists(t, filepath.Join(root, "disk.img"))
+	assert.FileExists(t, filepath.Join(inner, "disk.img"), "a nested (possibly in-use) image must survive")
+}
+
+func TestUnreserved(t *testing.T) {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	old := reserved
+	defer func() { reserved = old }()
+
+	reserved = 30 * gib
+	assert.Equal(t, 70*gib, unreserved(100*gib))
+	assert.Equal(t, uint64(0), unreserved(10*gib), "reservations above free must not underflow")
 }
