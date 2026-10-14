@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/nodehealth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
@@ -366,7 +367,9 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 			if err != nil {
 				return nil, nil, err
 			}
-			return p, nil, nil
+			// Ready follows the Docker side-car daemon (e.g. a stopped Colima shows up as NotReady).
+			health := nodehealth.New(cfg.Node, dockerHealthCheck, dockerHealthInterval())
+			return p, health, nil
 		},
 		func(cfg *nodeutil.NodeConfig) error {
 			return withClient(c, cfg)
@@ -420,15 +423,35 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 	return node.Err()
 }
 
-func createDockerClient(ctx context.Context) (dockerCl *docker.Client, err error) {
-	// Check if DOCKER_HOST environment variable is set
-	if host := os.Getenv("DOCKER_HOST"); host != "" {
-		dockerCl, err = docker.NewClientWithOpts(docker.WithHost(host))
-	} else {
-		// Probe for the existing docker client
-		dockerCl, err = docker.NewClientWithOpts()
+// dockerHealthCheck pings the Docker daemon with a fresh client, so it also recovers
+// when the daemon was down at startup.
+func dockerHealthCheck(ctx context.Context) error {
+	cl, err := newDockerClient()
+	if err != nil {
+		return err
 	}
+	defer cl.Close()
+	_, err = cl.Ping(ctx)
+	return err
+}
 
+func dockerHealthInterval() time.Duration {
+	d, err := time.ParseDuration(os.Getenv("VZ_DOCKER_HEALTH_INTERVAL"))
+	if err != nil || d <= 0 {
+		return nodehealth.DefaultInterval
+	}
+	return d
+}
+
+func newDockerClient() (*docker.Client, error) {
+	if host := os.Getenv("DOCKER_HOST"); host != "" {
+		return docker.NewClientWithOpts(docker.WithHost(host))
+	}
+	return docker.NewClientWithOpts()
+}
+
+func createDockerClient(ctx context.Context) (dockerCl *docker.Client, err error) {
+	dockerCl, err = newDockerClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %w", err)
 	}
