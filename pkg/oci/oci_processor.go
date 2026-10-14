@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
 
@@ -58,12 +57,9 @@ func (s *Store) processCompressedContent(ctx context.Context, expected ocispec.D
 		span.End()
 	}()
 
-	size, err := strconv.ParseInt(uncompressedSize, 10, 64)
+	size, err := ParseUncompressedSize(uncompressedSize)
 	if err != nil {
-		return fmt.Errorf("invalid uncompressed size: %w", err)
-	}
-	if size <= 0 {
-		return fmt.Errorf("invalid uncompressed size %q: must be positive", uncompressedSize)
+		return err
 	}
 
 	// Stream the download straight through gzip into a partial file next to the

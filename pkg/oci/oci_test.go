@@ -433,3 +433,13 @@ func TestUnsafeTitleRejected(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, entries, "nothing may be written")
 }
+
+func TestParseUncompressedSize(t *testing.T) {
+	n, err := oci.ParseUncompressedSize("120000000000")
+	require.NoError(t, err)
+	assert.Equal(t, int64(120000000000), n)
+	for _, bad := range []string{"", "0", "-5", "+5", "1_000", "0x10", " 5", "5 ", "1e3", "99999999999999999999"} {
+		_, err := oci.ParseUncompressedSize(bad)
+		assert.Error(t, err, "%q", bad)
+	}
+}

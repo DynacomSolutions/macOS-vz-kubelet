@@ -136,6 +136,18 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 	// bad image ref surfaces async as a Failed VM the controller force-deletes and
 	// recreates in a churn loop, and an invalid macOS container[0] still spawns sidecars.
 	macOSContainer := pod.Spec.Containers[0]
+	// Refuse images outside VZ_ALLOWED_IMAGE_PREFIXES before anything is pulled, so a
+	// Pod that tolerates every taint cannot run an arbitrary image on this host.
+	if !linuxOnly {
+		prefixes := envcfg.AllowedImagePrefixes()
+		for _, cs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+			for _, ct := range cs {
+				if !envcfg.ImageAllowed(prefixes, ct.Image) {
+					return errdefs.InvalidInputf("image %q of container %q is not allowed on this node: it must start with one of %v (VZ_ALLOWED_IMAGE_PREFIXES)", ct.Image, ct.Name, prefixes)
+				}
+			}
+		}
+	}
 	var cpu uint
 	var memorySize uint64
 	if !linuxOnly {
