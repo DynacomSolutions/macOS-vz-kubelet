@@ -2,12 +2,14 @@ package downloader
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/vm/config"
@@ -24,6 +26,9 @@ import (
 type Manager struct {
 	eventRecorder event.EventRecorder
 	cachePath     string
+	minFreeBytes  uint64
+	// inUse returns the image refs referenced by Pods/VMs on this node; set by SetInUse.
+	inUse func() []string
 
 	downloads *xsync.Map[string, *state]
 }
@@ -46,8 +51,28 @@ func NewManager(eventRecorder event.EventRecorder, cachePath string) *Manager {
 	return &Manager{
 		eventRecorder: eventRecorder,
 		cachePath:     cachePath,
+		minFreeBytes:  envcfg.MinFreeBytes(),
 		downloads:     xsync.NewMap[string, *state](),
 	}
+}
+
+// SetInUse registers the source of image refs that must never be evicted from the cache.
+func (m *Manager) SetInUse(f func() []string) { m.inUse = f }
+
+// inUseDirs returns the cache directories of every ref in use or being downloaded.
+func (m *Manager) inUseDirs() (dirs []string) {
+	var refs []string
+	if m.inUse != nil {
+		refs = m.inUse()
+	}
+	m.downloads.Range(func(ref string, _ *state) bool {
+		refs = append(refs, ref)
+		return true
+	})
+	for _, r := range refs {
+		dirs = append(dirs, filepath.Join(m.cachePath, "blobs", convertToPath(r)))
+	}
+	return dirs
 }
 
 // Download ensures that a download operation identified by 'ref' is only initiated once,
@@ -154,6 +179,8 @@ func (m *Manager) startDownload(ctx context.Context, state *state, ref string, i
 		StorePath:       m.cachePath,
 		IgnoreExisiting: ignoreExisting,
 		Credentials:     creds,
+		MinFreeBytes:    m.minFreeBytes,
+		InUse:           m.inUseDirs(),
 	}, m.eventRecorder)
 
 	state.duration = time.Since(startTime)

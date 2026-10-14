@@ -68,13 +68,21 @@ func NewMacOSClient(ctx context.Context, eventRecorder event.EventRecorder, netw
 	})
 	defer span.End()
 
-	return &MacOSClient{
+	c := &MacOSClient{
 		eventRecorder:              eventRecorder,
 		networkInterfaceIdentifier: networkInterfaceIdentifier,
 		downloadManager:            downloader.NewManager(eventRecorder, cachePath),
 		vmPermits:                  make(chan struct{}, vmcap.Configured()),
 		vms:                        vmdata.NewVirtualMachineData(),
 	}
+	// Images referenced by any Pod/VM on this node must never be evicted.
+	c.downloadManager.SetInUse(func() (refs []string) {
+		for _, info := range c.vms.All() {
+			refs = append(refs, info.Ref)
+		}
+		return refs
+	})
+	return c
 }
 
 // CreateVirtualMachine creates a new virtual machine with the specified parameters.
