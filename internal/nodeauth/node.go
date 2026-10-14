@@ -375,3 +375,13 @@ func setNodeReady(n *v1.Node) {
 		return
 	}
 }
+
+// Err returns any error that occurred with the controller; nil before Done is closed.
+func (n *Node) Err() error {
+	select {
+	case <-n.Done():
+		return n.err
+	default:
+		return nil
+	}
+}
