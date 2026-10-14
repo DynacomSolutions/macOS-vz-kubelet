@@ -1,0 +1,61 @@
+package downloader
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+// ImageDir returns the cache directory of ref under storePath, refusing a reference that would
+// map outside <storePath>/blobs.
+func ImageDir(storePath, ref string) (string, error) {
+	blobsRoot := filepath.Join(storePath, "blobs")
+	imageDir := filepath.Join(blobsRoot, convertToPath(ref))
+	if rel, err := filepath.Rel(blobsRoot, imageDir); err != nil || !filepath.IsLocal(rel) || rel == "." {
+		return "", fmt.Errorf("image reference %q maps outside the cache", ref)
+	}
+	return imageDir, nil
+}
+
+// CachedImage is an image whose every layer is in the cache and digest-verified.
+type CachedImage struct {
+	Dir            string
+	ManifestDigest string
+	Layers         []ocispec.Descriptor
+}
+
+// VerifyCached resolves ref's manifest in the registry (the manifest only, no layers) and
+// requires every layer of it to be already cached and validated (isCached: the digest
+// sidecar is newer than the file and records the manifest's digest). It never pulls.
+func VerifyCached(ctx context.Context, storePath, ref string, creds resource.RegistryCredentials) (CachedImage, error) {
+	dir, err := ImageDir(storePath, ref)
+	if err != nil {
+		return CachedImage{}, err
+	}
+	desc, layers, err := fetchLayers(ctx, ref, creds)
+	if err != nil {
+		return CachedImage{}, err
+	}
+	for _, l := range layers {
+		if !isCached(l, dir) {
+			return CachedImage{}, fmt.Errorf("image %s is not fully cached and verified (layer %q); pull it with a Pod first", ref, l.Annotations[ocispec.AnnotationTitle])
+		}
+	}
+	return CachedImage{Dir: dir, ManifestDigest: desc.Digest.String(), Layers: layers}, nil
+}
+
+// FreeBytes reports the space available on the volume holding path.
+func FreeBytes(path string) (uint64, error) { return freeBytes(path) }
+
+// Fits reports whether free space after writing needed bytes stays at or above floor.
+func Fits(free, needed, floor uint64) bool { return fits(free, needed, floor) }
+
+// WatchFreeSpace returns a context that is cancelled with ErrInsufficientSpace as its cause if
+// free space on path drops below floor (0 disables). Call stop when done.
+func WatchFreeSpace(ctx context.Context, path string, floor uint64) (context.Context, func()) {
+	return watchFreeSpace(ctx, path, floor)
+}

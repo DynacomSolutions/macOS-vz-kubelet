@@ -173,6 +173,20 @@ Local image files carry a recorded digest to guarantee integrity:
 - If the digest file is missing or is not newer than the image file, the digest is recomputed from the image;
   a mismatch invalidates the local cache and the image is re-pulled.
 
+## Building an image from a cached one
+
+`MacOSVK build-image` (root only, never a Pod feature) derives a new image from one the provider has already cached, without downloading it again:
+
+```
+MacOSVK build-image --from <registry/ns/name:tag> --to <registry/ns/name:tag> \
+  --script /abs/path/script.sh --registry-creds-file /abs/path/creds.json
+```
+
+- `--from` and `--to` must both start with an entry of `VZ_ALLOWED_IMAGE_PREFIXES` (required for this command), and `--from` must be fully cached and digest-verified.
+- The disk and aux images are APFS-cloned into `<cache>/build/` (same volume), booted headless, the script runs in the guest as `VZ_SSH_USER` over the existing key, then the VM is stopped from the host (a guest shutdown leaks a VM slot on macOS 26.5).
+- The result is streamed to the registry as gzip layers with no temp file: each layer is read twice (digest first, then upload). `creds.json` is `{"username":"..","password":".."}` or `{"identityToken":".."}`, owned by root, mode 0600. The script must be root-owned and not group/other writable.
+- It refuses to run while any virtual machine is running on the host, honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
+
 ## Feature overview
 
 The tables below list supported Kubernetes features. Anything not listed is unsupported.

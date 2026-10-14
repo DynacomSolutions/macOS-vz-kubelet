@@ -86,6 +86,77 @@ func CompressFileWithPath(ctx context.Context, inputFilePath string, outputFile 
 	}, nil
 }
 
+// CompressToWriter gzips the file at inputFilePath into out and returns the sizes and digests of
+// the compressed and uncompressed content. Nothing is buffered on disk, and the output depends
+// only on the input, so two runs over an unchanged file produce identical bytes: a first run
+// into io.Discard yields the digest and size a streaming upload needs up front.
+func CompressToWriter(ctx context.Context, inputFilePath string, out io.Writer) (r CompressionResult, err error) {
+	_, span := trace.StartSpan(ctx, "OCI.CompressToWriter")
+	defer func() {
+		span.SetStatus(err)
+		span.End()
+	}()
+
+	inputFile, err := os.Open(inputFilePath)
+	if err != nil {
+		return CompressionResult{}, err
+	}
+	defer func() {
+		err = errors.Join(err, inputFile.Close())
+	}()
+
+	gzDigester := digest.Canonical.Digester()
+	uncompressedDigester := digest.Canonical.Digester()
+	counter := &countingWriter{w: io.MultiWriter(out, gzDigester.Hash())}
+
+	w, err := pgzip.NewWriterLevel(counter, pgzip.DefaultCompression)
+	if err != nil {
+		return CompressionResult{}, err
+	}
+	if err = w.SetConcurrency(DefaultBlockSize, runtime.NumCPU()*2); err != nil {
+		return CompressionResult{}, err
+	}
+
+	if _, err = io.Copy(w, &ctxReader{ctx: ctx, r: io.TeeReader(inputFile, uncompressedDigester.Hash())}); err != nil {
+		_ = w.Close()
+		return CompressionResult{}, err
+	}
+	if err = w.Close(); err != nil {
+		return CompressionResult{}, err
+	}
+
+	return CompressionResult{
+		CompressedSize:     counter.n,
+		UncompressedSize:   int64(w.UncompressedSize()),
+		GzDigest:           gzDigester.Digest(),
+		UncompressedDigest: uncompressedDigester.Digest(),
+	}, nil
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// ctxReader fails reads once ctx is done, so a long compression stops on cancellation.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
 // DecompressFileWithPath uncompresses the file at the given path and writes the uncompressed content to the output file.
 // It uses gzip for uncompression and writes the content in chunks to the output file by skipping zero chunks.
 func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath string, uncompressedSize int64) (d digest.Digest, err error) {
