@@ -380,7 +380,10 @@ func (c *DockerClient) GetContainerLogs(ctx context.Context, namespace, podName,
 		span.End()
 	}()
 
-	tailStr := strconv.Itoa(opts.Tail)
+	tailStr := "all" // kubectl logs without --tail gives Tail=0; Docker reads "0" as zero lines
+	if opts.Tail > 0 {
+		tailStr = strconv.Itoa(opts.Tail)
+	}
 
 	// Convert SinceSeconds to a time string
 	var sinceStr string

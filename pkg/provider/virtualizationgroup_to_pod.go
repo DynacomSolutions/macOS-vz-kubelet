@@ -31,6 +31,10 @@ func (p *MacOSVZProvider) virtualizationGroupToPod(ctx context.Context, vg *clie
 func (p *MacOSVZProvider) buildPodStatus(_ context.Context, vg *client.VirtualizationGroup, pod *corev1.Pod) *corev1.PodStatus {
 	var firstContainerStartTime, lastUpdateTime time.Time
 
+	linuxOnly := resource.IsLinuxOnly(pod)
+	if linuxOnly {
+		vg = &client.VirtualizationGroup{MacOSVirtualMachine: resource.LinuxOnlyVM{IP: p.nodeIPAddress}, Containers: vg.Containers}
+	}
 	macOSVM := vg.MacOSVirtualMachine
 	groupContainers := vg.Containers
 
@@ -46,7 +50,7 @@ func (p *MacOSVZProvider) buildPodStatus(_ context.Context, vg *client.Virtualiz
 
 	for i, c := range pod.Spec.Containers {
 		// vz: always assume that first container is macOS container
-		if i == 0 {
+		if i == 0 && !linuxOnly {
 			state := macOSVM.State()
 			// Gate readiness on the post-start marker for EVERY macOS container[0], not
 			// just hook pods: it is set when the SSH readiness probe succeeds (hookless
