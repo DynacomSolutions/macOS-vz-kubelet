@@ -219,7 +219,7 @@ defines an exec postStart hook, Ready is gated on that hook finishing successful
 
 | Feature                  | Supported | Comments                                   |
 |--------------------------|:---------:|--------------------------------------------|
-| Host volumes             | ✅        |                                            |
+| Host volumes             | ⚠️        | Denied unless allowed by `VZ_HOSTPATH_ALLOWLIST`. |
 | Empty dir volumes        | ✅        | `sizeLimit` is not enforced.               |
 | Persistent volumes       | ❌        | Unsupported by Virtual Kubelet in general. |
 | Config map volumes       | ❌        | On the short list.                         |
@@ -316,6 +316,18 @@ shutdown. Provide one of the key variables or `VZ_SSH_PASSWORD`.
 |-----------------------|:--------:|------------------------|--------------------------------------------------------------------------|
 | `VZ_BRIDGE_INTERFACE` |          | (empty, NAT)           | Host interface for bridged networking. Requires vmnet entitlements.      |
 | `DOCKER_HOST`         |          | Docker SDK auto-detect | Docker daemon address for side-car containers.                           |
+
+#### Host path volumes
+
+| Variable                | Required | Default      | Description                                                                 |
+|-------------------------|:--------:|--------------|-----------------------------------------------------------------------------|
+| `VZ_HOSTPATH_ALLOWLIST` |          | (empty, deny)| Comma-separated absolute path prefixes that Pod `hostPath` volumes may use. |
+
+The provider can run as root, so `hostPath` is deny-by-default. Each requested path is cleaned, `..` is
+refused, symlinks are resolved on the deepest existing ancestor, and the result must sit under an allowed
+prefix on a path boundary (`/a` does not allow `/ab`). The directory is only created once allowed. A denied
+volume fails Pod creation with the reason in the Pod status. `volumeMount.readOnly` is honoured for both
+Docker side-cars and macOS VM shared directories.
 
 #### Tracing (OpenTelemetry)
 
