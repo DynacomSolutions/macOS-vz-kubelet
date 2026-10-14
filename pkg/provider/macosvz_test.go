@@ -224,7 +224,7 @@ func TestCreatePod(t *testing.T) {
 					}
 				}
 				return true
-			}), mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+			}), mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
 				_, ok := store.ForImage("nginx:latest")
 				return !ok
 			})).Return(nil)
@@ -429,7 +429,7 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 			expectedPod := pod.DeepCopy()
 
 			if !tc.expectErr {
-				vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, "", mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+				vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, "", mock.Anything, mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
 					cred, ok := store.ForImage(tc.podImage)
 					if tc.expectCreds {
 						if !ok {
@@ -445,7 +445,7 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 			if tc.expectErr {
 				require.Error(t, err)
 				assert.True(t, errdefs.IsInvalidInput(err))
-				vzClient.AssertNotCalled(t, "CreateVirtualizationGroup", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				vzClient.AssertNotCalled(t, "CreateVirtualizationGroup", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 				return
 			}
 
@@ -469,7 +469,7 @@ func TestCreatePod_ImagePullSecretsNeverReadServiceAccount(t *testing.T) {
 	})
 
 	vzClient := clientmocks.NewVzClientInterface(t)
-	vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "", mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+	vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "", mock.Anything, mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
 		_, ok := store.ForImage("registry.example.com/app:1")
 		return ok
 	})).Return(nil)
@@ -1005,7 +1005,7 @@ func TestCreatePod_TokenRequestBoundToPod(t *testing.T) {
 				},
 			}
 			vzClient := clientmocks.NewVzClientInterface(t)
-			vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "tok", mock.Anything, mock.Anything).Return(nil)
+			vzClient.On("CreateVirtualizationGroup", mock.Anything, mock.Anything, "tok", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 			p, err := provider.NewMacOSVZProvider(ctx, vzClient, provider.MacOSVZProviderConfig{Platform: defaultPlatform, K8sClient: fakeClient})
 			require.NoError(t, err)
 			require.NoError(t, p.CreatePod(ctx, pod))

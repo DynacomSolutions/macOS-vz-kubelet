@@ -33,12 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const (
-	// PodMountsDir is the directory where pod volumes are mounted.
-	// It is createdinside the cache directory.
-	PodMountsDir = "mounts"
-)
-
 var (
 	// errVirtualizationGroupNotFound is returned when a virtualization group is not found.
 	errVirtualizationGroupNotFound = errdefs.NotFound("virtualization group not found")
@@ -75,12 +69,12 @@ type VzClientAPIs struct {
 	MacOSClient     *rm.MacOSClient
 	ContainerClient rm.ContainersClient // Optional
 
-	cachePath string
-	extras    *xsync.Map[types.NamespacedName, *virtualizationGroupExtras]
+	podVolumesDir string // resolved and prepared by the caller (volumes.PreparePodVolumesDir)
+	extras        *xsync.Map[types.NamespacedName, *virtualizationGroupExtras]
 }
 
 // NewVzClientAPIs initializes and returns a new VzClientAPIs instance.
-func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, networkInterfaceIdentifier, cachePath string, dockerCl *docker.Client) (client *VzClientAPIs) {
+func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, networkInterfaceIdentifier, cachePath, podVolumesDir string, dockerCl *docker.Client) (client *VzClientAPIs) {
 	ctx, span := trace.StartSpan(ctx, "VZClient.NewVzClientAPIs")
 	defer span.End()
 
@@ -89,13 +83,10 @@ func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, net
 	// VZ_POSTSTART_TIMEOUT that silently fell back to the default is visible.
 	log.G(ctx).Infof("post-start hook timeout: %s", PostStartCommandTimeout)
 
-	// force remove dangling mounts
-	_ = os.RemoveAll(filepath.Join(cachePath, PodMountsDir))
-
 	client = &VzClientAPIs{
-		MacOSClient: rm.NewMacOSClient(ctx, eventRecorder, networkInterfaceIdentifier, cachePath),
-		cachePath:   cachePath,
-		extras:      xsync.NewMap[types.NamespacedName, *virtualizationGroupExtras](),
+		MacOSClient:   rm.NewMacOSClient(ctx, eventRecorder, networkInterfaceIdentifier, cachePath),
+		podVolumesDir: podVolumesDir,
+		extras:        xsync.NewMap[types.NamespacedName, *virtualizationGroupExtras](),
 	}
 
 	containerClient, err := rm.NewDockerClient(ctx, dockerCl, eventRecorder)
@@ -110,7 +101,7 @@ func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, net
 }
 
 // CreateVirtualizationGroup creates a new virtualization group based on the provided Kubernetes pod.
-func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap, creds resource.RegistryCredentialStore) (err error) {
+func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap, secrets map[string]*corev1.Secret, creds resource.RegistryCredentialStore) (err error) {
 	ctx, span := trace.StartSpan(ctx, "VZClient.CreateVirtualizationGroup")
 	key := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
 	extras := &virtualizationGroupExtras{
@@ -184,7 +175,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		}
 		vmCreds, _ := creds.ForImage(macOSContainer.Image)
 
-		mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, macOSContainer, pod, serviceAccountToken, configMaps)
+		mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, macOSContainer, pod, serviceAccountToken, configMaps, secrets)
 		if err != nil {
 			return err
 		}
@@ -225,7 +216,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		g.Go(func() error {
 			containerCreds, _ := creds.ForImage(container.Image)
 
-			mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, container, pod, serviceAccountToken, configMaps)
+			mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, container, pod, serviceAccountToken, configMaps, secrets)
 			if err != nil {
 				return err
 			}
@@ -553,5 +544,5 @@ func (c *VzClientAPIs) GetVirtualizationGroupStats(ctx context.Context, namespac
 
 // getPodVolumeRoot returns the root path for the volumes of a pod
 func (c *VzClientAPIs) getPodVolumeRoot(pod *corev1.Pod) string {
-	return filepath.Join(c.cachePath, PodMountsDir, string(pod.UID))
+	return filepath.Join(c.podVolumesDir, string(pod.UID))
 }

@@ -329,6 +329,21 @@ prefix on a path boundary (`/a` does not allow `/ab`). The directory is only cre
 volume fails Pod creation with the reason in the Pod status. `volumeMount.readOnly` is honoured for both
 Docker side-cars and macOS VM shared directories.
 
+#### Pod volume directory
+
+| Variable             | Required | Default                  | Description                                                              |
+|----------------------|:--------:|--------------------------|--------------------------------------------------------------------------|
+| `VZ_POD_VOLUMES_DIR` |          | `<cache dir>/mounts`     | Absolute directory where `emptyDir`, `configMap`, `secret`, `projected` and downward API volumes are written, for Docker side-cars and the macOS VM. |
+
+Set it to a directory your Docker VM (for example Colima) shares, such as a virtiofs mount, so bind sources
+are visible to the containers. At start the provider deletes only the children of this directory, never the
+directory itself, so a share pointing at it survives. A missing directory is created with mode 0755; an existing
+one keeps its mode, ownership and ACLs. A relative path or a symlink is refused and the provider does not start.
+Per-pod subdirectories and files are created without changing ACLs, so ACEs inherited from the parent apply.
+`emptyDir` directories are set to mode 0777 so the container user can write to them (chmod does not remove
+macOS ACL entries). `configMap` and `secret` volumes honour `items`, `defaultMode` (default 0644) and `optional`;
+secrets are fetched by name, which the Node authorizer permits.
+
 #### Tracing (OpenTelemetry)
 
 | Variable                      | Required | Default          | Description                                |

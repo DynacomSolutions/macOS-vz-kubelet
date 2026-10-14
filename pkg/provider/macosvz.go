@@ -99,7 +99,7 @@ func (p *MacOSVZProvider) CreatePod(ctx context.Context, pod *corev1.Pod) (err e
 	}()
 	log.G(ctx).Debug("Received CreatePod request")
 
-	configMaps, serviceAccountToken, err := p.extractPodCredentials(ctx, pod)
+	configMaps, secrets, serviceAccountToken, err := p.extractPodCredentials(ctx, pod)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func (p *MacOSVZProvider) CreatePod(ctx context.Context, pod *corev1.Pod) (err e
 		return errdefs.AsInvalidInput(err)
 	}
 
-	return p.vzClient.CreateVirtualizationGroup(ctx, pod, serviceAccountToken, configMaps, registryCreds)
+	return p.vzClient.CreateVirtualizationGroup(ctx, pod, serviceAccountToken, configMaps, secrets, registryCreds)
 }
 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.
