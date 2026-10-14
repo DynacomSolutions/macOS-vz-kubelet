@@ -25,13 +25,41 @@ func TestRequiredBytes(t *testing.T) {
 	plain := ocispec.Descriptor{Size: 5, Annotations: map[string]string{ocispec.AnnotationTitle: "aux.img"}}
 	layers := []ocispec.Descriptor{compressed, plain}
 
-	// compressed layer = temp download + unpacked output; plain layer = once.
-	assert.Equal(t, uint64(10+40+5), requiredBytes(layers, dir, false))
+	// streamed compressed layer = uncompressed output only; plain layer = its size.
+	assert.Equal(t, uint64(40+5), requiredBytes(layers, dir, false))
 
-	// an already cached output costs nothing, unless a re-pull is forced.
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "disk.img"), []byte("x"), 0o600))
+	// a bare file without a digest sidecar is an aborted partial: still counted in full.
+	disk := filepath.Join(dir, "disk.img")
+	require.NoError(t, os.WriteFile(disk, []byte("x"), 0o600))
+	assert.Equal(t, uint64(45), requiredBytes(layers, dir, false))
+
+	// a validated file (sidecar newer than file) costs nothing, unless a re-pull is forced.
+	require.NoError(t, os.WriteFile(disk+".digest", []byte("sha256:abc"), 0o600))
+	require.NoError(t, os.Chtimes(disk, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)))
 	assert.Equal(t, uint64(5), requiredBytes(layers, dir, false))
-	assert.Equal(t, uint64(55), requiredBytes(layers, dir, true))
+	assert.Equal(t, uint64(45), requiredBytes(layers, dir, true))
+}
+
+func TestRemoveStale(t *testing.T) {
+	dir := t.TempDir()
+	layers := []ocispec.Descriptor{
+		{Annotations: map[string]string{ocispec.AnnotationTitle: "stale.img"}},
+		{Annotations: map[string]string{ocispec.AnnotationTitle: "good.img"}},
+	}
+	for _, f := range []string{"stale.img", "stale.img.partial", "good.img", "good.img.digest"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600))
+	}
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(filepath.Join(dir, "good.img"), old, old))
+
+	removeStale(layers, dir, false)
+
+	for _, f := range []string{"stale.img", "stale.img.partial"} {
+		assert.NoFileExists(t, filepath.Join(dir, f))
+	}
+	for _, f := range []string{"good.img", "good.img.digest"} {
+		assert.FileExists(t, filepath.Join(dir, f))
+	}
 }
 
 func TestFits(t *testing.T) {
@@ -87,7 +115,16 @@ func TestListCache(t *testing.T) {
 	got := listCache(root)
 	require.Len(t, got, 1)
 	assert.Equal(t, img, got[0].dir)
-	assert.Equal(t, uint64(7), got[0].size)
+	assert.GreaterOrEqual(t, got[0].size, uint64(7))
+
+	// sparse files count by allocated bytes, not logical size
+	f, err := os.Create(filepath.Join(img, "sparse.img"))
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(1<<40))
+	require.NoError(t, f.Close())
+	got = listCache(root)
+	require.Len(t, got, 1)
+	assert.Less(t, got[0].size, uint64(1<<20))
 }
 
 func dirs(es []cacheEntry) (out []string) {

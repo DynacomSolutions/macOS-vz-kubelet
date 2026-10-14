@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 
@@ -27,7 +28,7 @@ import (
 var ErrInsufficientSpace = errors.New("insufficient free disk space")
 
 // diskPollInterval is how often free space is checked during a pull.
-const diskPollInterval = 5 * time.Second
+const diskPollInterval = time.Second
 
 // guardMu serialises estimate + eviction so concurrent pulls do not both spend
 // the same free space.
@@ -49,26 +50,56 @@ func freeBytes(path string) (uint64, error) {
 	return uint64(st.Bsize) * uint64(st.Bavail), nil // nolint: gosec
 }
 
-// requiredBytes is the peak extra disk a pull of layers needs. A compressed layer
-// is downloaded to a temp file (kept until the store closes) and then decompressed
-// to its output, so it costs compressed + uncompressed size; a plain layer costs its
-// size once. Layers whose output file already exists are skipped unless ignoreExisting
-// (assumes they validate; an invalid one is re-pulled and caught by the mid-pull poll).
+// isCached reports whether the layer output is already in dir and validated: its
+// digest sidecar is newer than the file, the same test ValidateFileWithDigest uses to
+// skip rehashing. A bare file with no sidecar is a partial from an aborted pull.
+func isCached(l ocispec.Descriptor, dir string) bool {
+	name := l.Annotations[ocispec.AnnotationTitle]
+	if name == "" {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(dir, name))
+	if err != nil {
+		return false
+	}
+	si, err := os.Stat(filepath.Join(dir, name+disk.DigestFileSuffix))
+	return err == nil && si.ModTime().After(fi.ModTime())
+}
+
+// requiredBytes is the peak extra disk a pull of layers needs. A compressed layer is
+// streamed through gzip into its output, so it costs its uncompressed size only (the
+// annotation is the logical size, an upper bound as zero blocks stay sparse); a plain
+// layer costs its size. Layers already cached and validated cost nothing unless
+// ignoreExisting forces a re-pull. Stale outputs of layers that will be pulled are
+// removed by ensureSpace first, so they are not counted twice.
 func requiredBytes(layers []ocispec.Descriptor, workingDir string, ignoreExisting bool) uint64 {
 	var total uint64
 	for _, l := range layers {
-		if name := l.Annotations[ocispec.AnnotationTitle]; name != "" && !ignoreExisting {
-			if _, err := os.Stat(filepath.Join(workingDir, name)); err == nil {
-				continue
-			}
+		if !ignoreExisting && isCached(l, workingDir) {
+			continue
 		}
-		total += uint64(max(l.Size, 0)) // nolint: gosec
 		_, hasDigest := l.Annotations[oci.AnnotationUncompressedDigest]
 		if u, err := strconv.ParseUint(l.Annotations[oci.AnnotationUncompressedSize], 10, 64); err == nil && hasDigest {
 			total += u
+		} else {
+			total += uint64(max(l.Size, 0)) // nolint: gosec
 		}
 	}
 	return total
+}
+
+// removeStale deletes outputs (and leftover .partial files) of layers about to be
+// pulled: they are invalid or being replaced, and would otherwise hold disk twice.
+func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
+	for _, l := range layers {
+		name := l.Annotations[ocispec.AnnotationTitle]
+		if name == "" || (!ignoreExisting && isCached(l, dir)) {
+			continue
+		}
+		for _, f := range []string{name, name + disk.DigestFileSuffix, name + ".partial"} {
+			_ = os.Remove(filepath.Join(dir, f))
+		}
+	}
 }
 
 // fits reports whether free space after writing needed bytes stays at or above floor.
@@ -110,7 +141,12 @@ func listCache(root string) (entries []cacheEntry) {
 		e := cacheEntry{dir: p}
 		for _, f := range files {
 			if info, err := f.Info(); err == nil && f.Type().IsRegular() {
-				e.size += uint64(info.Size()) // nolint: gosec
+				// allocated bytes, not logical size: decompressed disks are sparse
+				if st, ok := info.Sys().(*syscall.Stat_t); ok {
+					e.size += uint64(st.Blocks) * 512 // nolint: gosec
+				} else {
+					e.size += uint64(info.Size()) // nolint: gosec
+				}
 			}
 		}
 		if e.size > 0 {
@@ -157,6 +193,7 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) error {
 	if err != nil {
 		return err
 	}
+	removeStale(layers, imageDir, params.IgnoreExisiting)
 	needed := requiredBytes(layers, imageDir, params.IgnoreExisiting)
 	root := filepath.Join(params.StorePath, "blobs")
 	if err := os.MkdirAll(root, os.ModePerm); err != nil {
@@ -166,7 +203,9 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read free disk space: %w", err)
 	}
+	logger := log.G(ctx)
 	if fits(free, needed, params.MinFreeBytes) {
+		logger.Infof("Disk guard for %s: need %d bytes, %d free, floor %d: pulling without eviction", params.Ref, needed, free, params.MinFreeBytes)
 		return nil
 	}
 
@@ -176,11 +215,13 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) error {
 	}
 	evict, ok := selectEvictions(listCache(root), protected, free, needed, params.MinFreeBytes)
 	if !ok {
+		logger.Warnf("Disk guard for %s: need %d bytes, %d free, floor %d: refusing, evictable %d image(s) not enough", params.Ref, needed, free, params.MinFreeBytes, len(evict))
 		return fmt.Errorf("%w: pull of %s needs %d bytes, %d free, floor %d, and no unused cached image can be evicted to make room",
 			ErrInsufficientSpace, params.Ref, needed, free, params.MinFreeBytes)
 	}
+	logger.Infof("Disk guard for %s: need %d bytes, %d free, floor %d: evicting %d unused image(s)", params.Ref, needed, free, params.MinFreeBytes, len(evict))
 	for _, e := range evict {
-		log.G(ctx).Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space for %s", e.dir, e.size, e.lastUsed.Format(time.RFC3339), params.Ref)
+		logger.Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space for %s", e.dir, e.size, e.lastUsed.Format(time.RFC3339), params.Ref)
 		if err := os.RemoveAll(e.dir); err != nil {
 			return fmt.Errorf("failed to evict %s: %w", e.dir, err)
 		}
