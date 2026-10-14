@@ -64,9 +64,7 @@ func (c *MacOSClient) markPermitAcquired(key types.NamespacedName) error {
 	// permitClaimed is set inside the Compute callback, which executes synchronously,
 	// so it is safe to read after Compute returns.
 	permitClaimed := false
-	// No entry means nothing to release: whoever deleted it already released its permit, and
-	// draining here would take another VM's permit.
-	c.vms.Update(key.Namespace, key.Name, func(info vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	_, found := c.vms.Update(key.Namespace, key.Name, func(info vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		if !info.PermitAcquired {
 			info.PermitAcquired = true
 			permitClaimed = true
