@@ -2,11 +2,13 @@ package oci_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event/mocks"
@@ -345,4 +347,53 @@ func TestSet(t *testing.T) {
 	assert.NotEmpty(t, desc.Digest)
 	assert.Greater(t, desc.Size, int64(0))
 	assert.Contains(t, desc.Annotations, ocispec.AnnotationTitle)
+}
+
+// A compressed layer is streamed through gzip into the output: no temp copy is made,
+// the output is verified and moved into place, and a bad digest leaves nothing behind.
+func TestPushCompressedStreams(t *testing.T) {
+	plain := bytes.Repeat([]byte("macos-vz"), 1000)
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	_, err := w.Write(plain)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	newDesc := func(uncompressed digest.Digest) ocispec.Descriptor {
+		return ocispec.Descriptor{
+			MediaType: string(oci.MediaTypeDiskImage),
+			Digest:    digest.FromBytes(gz.Bytes()),
+			Size:      int64(gz.Len()),
+			Annotations: map[string]string{
+				ocispec.AnnotationTitle:          "disk.img",
+				oci.AnnotationUncompressedSize:   strconv.Itoa(len(plain)),
+				oci.AnnotationUncompressedDigest: uncompressed.String(),
+			},
+		}
+	}
+
+	t.Run("ok", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := oci.New(dir, false, mocks.NewEventRecorder(t))
+		require.NoError(t, err)
+		defer handleCloseError(t, store.Close)
+
+		require.NoError(t, store.Push(context.Background(), newDesc(digest.FromBytes(plain)), bytes.NewReader(gz.Bytes())))
+		got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
+		require.NoError(t, err)
+		assert.Equal(t, plain, got)
+		assert.FileExists(t, filepath.Join(dir, "disk.img.digest"))
+		assert.NoFileExists(t, filepath.Join(dir, "disk.img.partial"))
+	})
+
+	t.Run("digest mismatch leaves no output", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := oci.New(dir, false, mocks.NewEventRecorder(t))
+		require.NoError(t, err)
+		defer handleCloseError(t, store.Close)
+
+		err = store.Push(context.Background(), newDesc(digest.FromString("wrong")), bytes.NewReader(gz.Bytes()))
+		assert.ErrorContains(t, err, "digest mismatch")
+		assert.NoFileExists(t, filepath.Join(dir, "disk.img.partial"))
+	})
 }

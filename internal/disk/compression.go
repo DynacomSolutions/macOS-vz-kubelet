@@ -95,7 +95,6 @@ func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath s
 		span.End()
 	}()
 
-	// Open the source file for reading
 	inputFile, err := os.Open(inputFilePath)
 	if err != nil {
 		return "", err
@@ -104,6 +103,26 @@ func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath s
 		err = errors.Join(err, inputFile.Close())
 	}()
 
+	d, err = DecompressReader(ctx, inputFile, outputFilePath, uncompressedSize)
+	if err != nil {
+		return "", err
+	}
+
+	// Write the digest to a file as a cache
+	if err = WriteDigestFile(outputFilePath, d); err != nil {
+		return "", err
+	}
+	return d, nil
+}
+
+// WriteDigestFile records d as the digest of the file at filePath, marking it validated.
+func WriteDigestFile(filePath string, d digest.Digest) error {
+	return writeDigestFile(filePath, d)
+}
+
+// DecompressReader streams gzip data from r into the output file, skipping zero chunks
+// so the file stays sparse, and returns the digest of the uncompressed content.
+func DecompressReader(ctx context.Context, r io.Reader, outputFilePath string, uncompressedSize int64) (d digest.Digest, err error) {
 	// Create the output file for writing
 	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
@@ -118,7 +137,7 @@ func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath s
 		return "", err
 	}
 
-	r, err := pgzip.NewReader(inputFile)
+	gz, err := pgzip.NewReader(r)
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +158,7 @@ func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath s
 		}
 
 		// Read a chunk
-		n, err := r.Read(buf)
+		n, err := gz.Read(buf)
 		if err == io.EOF {
 			break // End of file
 		}
@@ -170,13 +189,5 @@ func DecompressFileWithPath(ctx context.Context, inputFilePath, outputFilePath s
 		}
 	}
 
-	d = digester.Digest()
-
-	// Write the digest to a file as a cache
-	err = writeDigestFile(outputFilePath, d)
-	if err != nil {
-		return "", err
-	}
-
-	return d, nil
+	return digester.Digest(), nil
 }

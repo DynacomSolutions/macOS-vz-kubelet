@@ -62,32 +62,38 @@ func (s *Store) processCompressedContent(ctx context.Context, expected ocispec.D
 		return fmt.Errorf("invalid uncompressed size: %w", err)
 	}
 
-	fp, err := s.tempFile()
-	if err != nil {
-		return err
-	}
-	ctx = span.WithField(ctx, "tmp", fp.Name())
+	// Stream the download straight through gzip into a partial file next to the
+	// output, so peak extra disk is the uncompressed size only (no full compressed
+	// temp copy). The partial is renamed over the output only once both digests match.
+	partial := outputFilePath + ".partial"
 	defer func() {
-		err = errors.Join(err, fp.Close())
+		if err != nil {
+			_ = os.Remove(partial)
+		}
 	}()
 
-	path := fp.Name()
-
-	// save the content to the temp file
-	if err = s.saveFile(ctx, fp, expected, content); err != nil {
-		return fmt.Errorf("failed to save content to temp file: %w", err)
-	}
-
-	// Since file was saved successfully, store the digest and path
-	s.digestToPath.Store(expected.Digest, path)
-
-	d, err := disk.DecompressFileWithPath(ctx, path, outputFilePath, size)
+	// verify the compressed digest while reading
+	vr := contentpkg.NewVerifyReader(content, expected)
+	d, err := disk.DecompressReader(ctx, vr, partial, size)
 	if err != nil {
 		return fmt.Errorf("failed to decompress file: %w", err)
+	}
+	// drain trailing bytes so the verifier sees the whole compressed stream
+	if _, err = io.Copy(io.Discard, vr); err != nil {
+		return fmt.Errorf("failed to read content: %w", err)
+	}
+	if err = vr.Verify(); err != nil {
+		return fmt.Errorf("failed to verify content in %s: %w", partial, err)
 	}
 
 	if d != digest.Digest(uncompressedDigest) {
 		return fmt.Errorf("digest mismatch: expected %s, got %s", uncompressedDigest, d)
+	}
+	if err = os.Rename(partial, outputFilePath); err != nil {
+		return fmt.Errorf("failed to move %s into place: %w", partial, err)
+	}
+	if err = disk.WriteDigestFile(outputFilePath, d); err != nil {
+		return err
 	}
 	s.mediaTypeToPath.Store(expected.MediaType, outputFilePath)
 
