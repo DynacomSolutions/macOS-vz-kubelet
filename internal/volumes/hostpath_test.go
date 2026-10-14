@@ -19,7 +19,7 @@ func hostPathMounts(path string, readOnly bool) ([]volumes.Mount, error) {
 		VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: path}},
 	}}}}
 	c := corev1.Container{VolumeMounts: []corev1.VolumeMount{{Name: "v", MountPath: "/mnt", ReadOnly: readOnly}}}
-	return volumes.CreateContainerMounts(context.Background(), "", c, pod, "", nil)
+	return volumes.CreateContainerMounts(context.Background(), "", c, pod, "", nil, nil)
 }
 
 func TestHostPathAllowlist(t *testing.T) {

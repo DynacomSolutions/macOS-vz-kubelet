@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ func newProviderFactory(t *testing.T, ctx context.Context, kcl *kubernetes.Clien
 			_ = dockerCl.Close()
 		})
 
-		vzClient := client.NewVzClientAPIs(ctx, eventRecorder, "", cachePath, dockerCl)
+		vzClient := client.NewVzClientAPIs(ctx, eventRecorder, "", cachePath, filepath.Join(cachePath, "mounts"), dockerCl)
 
 		providerConfig := provider.MacOSVZProviderConfig{
 			NodeName:           nodeName,

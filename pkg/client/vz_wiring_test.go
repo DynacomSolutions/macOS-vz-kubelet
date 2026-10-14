@@ -103,7 +103,7 @@ func TestGetVirtualizationGroupStats_MissingVM_NoPanic(t *testing.T) {
 
 	// nil docker client leaves ContainerClient unset (NewDockerClient errors on a
 	// nil client).
-	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), nil)
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
 
 	// Proves the stats path does not panic for a missing VM with a nil container
 	// client. It does NOT exercise the sidecar-loop nil-guard: GetVirtualMachineStats
@@ -135,7 +135,7 @@ func TestCreateVirtualizationGroup_RejectsInvalidMacOSResources(t *testing.T) {
 
 	// Single macOS container, nil ContainerClient. No cpu request -> cpu=0,
 	// which vm.ValidateCPUCount rejects.
-	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), nil)
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", UID: "uid-1"},
@@ -148,7 +148,7 @@ func TestCreateVirtualizationGroup_RejectsInvalidMacOSResources(t *testing.T) {
 
 	creds := resource.NewRegistryCredentialStore(nil)
 
-	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, creds)
+	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
 	assert.True(t, errdefs.IsInvalidInput(err), "want InvalidInput, got %v", err)
 
 	_, getErr := c.GetVirtualizationGroup(ctx, "default", "p")
@@ -161,7 +161,7 @@ func TestCreateVirtualizationGroup_RejectsUnparseableImageReference(t *testing.T
 
 	// Single macOS container, valid cpu/mem, nil ContainerClient. The image is a
 	// bare ref with no registry domain, which remote.NewRepository rejects.
-	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), nil)
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", UID: "uid-1"},
@@ -174,7 +174,7 @@ func TestCreateVirtualizationGroup_RejectsUnparseableImageReference(t *testing.T
 
 	creds := resource.NewRegistryCredentialStore(nil)
 
-	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, creds)
+	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
 	// Pre-fix this returned success and registered the VM (the bad ref only
 	// surfaced async in the downloader).
 	assert.True(t, errdefs.IsInvalidInput(err), "want InvalidInput, got %v", err)
@@ -191,7 +191,7 @@ func TestCreateVirtualizationGroup_InvalidMacOSDoesNotCreateSidecars(t *testing.
 	// macOS container[0] with no cpu request (cpu=0, rejected) plus a sidecar.
 	// nil docker client at construction, fake wired directly so a passing
 	// admission would reach it; an invalid macOS spec must short-circuit first.
-	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), nil)
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
 	c.ContainerClient = fake
 
 	pod := &corev1.Pod{
@@ -206,7 +206,7 @@ func TestCreateVirtualizationGroup_InvalidMacOSDoesNotCreateSidecars(t *testing.
 
 	creds := resource.NewRegistryCredentialStore(nil)
 
-	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, creds)
+	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
 	assert.True(t, errdefs.IsInvalidInput(err), "want InvalidInput, got %v", err)
 
 	fake.mu.Lock()
@@ -223,7 +223,7 @@ func TestCreateVirtualizationGroup_AllowsUnqualifiedSidecarImageRef(t *testing.T
 
 	// Valid macOS container[0]; sidecar uses a bare Docker-Hub ref. The Linux
 	// backend expands short names, so admission must NOT reject it (oras would).
-	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), nil)
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
 	c.ContainerClient = fake
 
 	pod := &corev1.Pod{
@@ -238,7 +238,7 @@ func TestCreateVirtualizationGroup_AllowsUnqualifiedSidecarImageRef(t *testing.T
 
 	creds := resource.NewRegistryCredentialStore(nil)
 
-	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, creds)
+	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
 	assert.False(t, errdefs.IsInvalidInput(err), "bare sidecar ref must not be rejected at admission, got %v", err)
 
 	fake.mu.Lock()

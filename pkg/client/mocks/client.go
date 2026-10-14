@@ -120,16 +120,16 @@ func (_c *VzClientInterface_AttachToContainer_Call) RunAndReturn(run func(ctx co
 }
 
 // CreateVirtualizationGroup provides a mock function for the type VzClientInterface
-func (_mock *VzClientInterface) CreateVirtualizationGroup(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, creds resource.RegistryCredentialStore) error {
-	ret := _mock.Called(ctx, pod, serviceAccountToken, configMaps, creds)
+func (_mock *VzClientInterface) CreateVirtualizationGroup(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, secrets map[string]*v1.Secret, creds resource.RegistryCredentialStore) error {
+	ret := _mock.Called(ctx, pod, serviceAccountToken, configMaps, secrets, creds)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateVirtualizationGroup")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, *v1.Pod, string, map[string]*v1.ConfigMap, resource.RegistryCredentialStore) error); ok {
-		r0 = returnFunc(ctx, pod, serviceAccountToken, configMaps, creds)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *v1.Pod, string, map[string]*v1.ConfigMap, map[string]*v1.Secret, resource.RegistryCredentialStore) error); ok {
+		r0 = returnFunc(ctx, pod, serviceAccountToken, configMaps, secrets, creds)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -146,12 +146,13 @@ type VzClientInterface_CreateVirtualizationGroup_Call struct {
 //   - pod *v1.Pod
 //   - serviceAccountToken string
 //   - configMaps map[string]*v1.ConfigMap
+//   - secrets map[string]*v1.Secret
 //   - creds resource.RegistryCredentialStore
-func (_e *VzClientInterface_Expecter) CreateVirtualizationGroup(ctx interface{}, pod interface{}, serviceAccountToken interface{}, configMaps interface{}, creds interface{}) *VzClientInterface_CreateVirtualizationGroup_Call {
-	return &VzClientInterface_CreateVirtualizationGroup_Call{Call: _e.mock.On("CreateVirtualizationGroup", ctx, pod, serviceAccountToken, configMaps, creds)}
+func (_e *VzClientInterface_Expecter) CreateVirtualizationGroup(ctx interface{}, pod interface{}, serviceAccountToken interface{}, configMaps interface{}, secrets interface{}, creds interface{}) *VzClientInterface_CreateVirtualizationGroup_Call {
+	return &VzClientInterface_CreateVirtualizationGroup_Call{Call: _e.mock.On("CreateVirtualizationGroup", ctx, pod, serviceAccountToken, configMaps, secrets, creds)}
 }
 
-func (_c *VzClientInterface_CreateVirtualizationGroup_Call) Run(run func(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, creds resource.RegistryCredentialStore)) *VzClientInterface_CreateVirtualizationGroup_Call {
+func (_c *VzClientInterface_CreateVirtualizationGroup_Call) Run(run func(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, secrets map[string]*v1.Secret, creds resource.RegistryCredentialStore)) *VzClientInterface_CreateVirtualizationGroup_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -169,9 +170,13 @@ func (_c *VzClientInterface_CreateVirtualizationGroup_Call) Run(run func(ctx con
 		if args[3] != nil {
 			arg3 = args[3].(map[string]*v1.ConfigMap)
 		}
-		var arg4 resource.RegistryCredentialStore
+		var arg4 map[string]*v1.Secret
 		if args[4] != nil {
-			arg4 = args[4].(resource.RegistryCredentialStore)
+			arg4 = args[4].(map[string]*v1.Secret)
+		}
+		var arg5 resource.RegistryCredentialStore
+		if args[5] != nil {
+			arg5 = args[5].(resource.RegistryCredentialStore)
 		}
 		run(
 			arg0,
@@ -179,6 +184,7 @@ func (_c *VzClientInterface_CreateVirtualizationGroup_Call) Run(run func(ctx con
 			arg2,
 			arg3,
 			arg4,
+			arg5,
 		)
 	})
 	return _c
@@ -189,7 +195,7 @@ func (_c *VzClientInterface_CreateVirtualizationGroup_Call) Return(err error) *V
 	return _c
 }
 
-func (_c *VzClientInterface_CreateVirtualizationGroup_Call) RunAndReturn(run func(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, creds resource.RegistryCredentialStore) error) *VzClientInterface_CreateVirtualizationGroup_Call {
+func (_c *VzClientInterface_CreateVirtualizationGroup_Call) RunAndReturn(run func(ctx context.Context, pod *v1.Pod, serviceAccountToken string, configMaps map[string]*v1.ConfigMap, secrets map[string]*v1.Secret, creds resource.RegistryCredentialStore) error) *VzClientInterface_CreateVirtualizationGroup_Call {
 	_c.Call.Return(run)
 	return _c
 }

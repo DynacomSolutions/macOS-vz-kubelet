@@ -257,38 +257,11 @@ func TestCreateContainerMounts(t *testing.T) {
 			},
 			expectedMounts: []volumes.Mount{},
 		},
-		{
-			name: "Unsupported volume type",
-			container: corev1.Container{
-				VolumeMounts: []corev1.VolumeMount{
-					{
-						Name:      "unsupported-volume",
-						MountPath: "/mnt/unsupported",
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Volumes: []corev1.Volume{
-						{
-							Name: "unsupported-volume",
-							VolumeSource: corev1.VolumeSource{
-								// This is an unsupported volume type for this function
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: "my-secret",
-								},
-							},
-						},
-					},
-				},
-			},
-			expectedMounts: []volumes.Mount{},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mounts, err := volumes.CreateContainerMounts(context.Background(), tempDir, tt.container, tt.pod, tt.serviceAccountToken, tt.configMaps)
+			mounts, err := volumes.CreateContainerMounts(context.Background(), tempDir, tt.container, tt.pod, tt.serviceAccountToken, tt.configMaps, nil)
 			if tt.expectError {
 				require.Error(t, err)
 			} else {

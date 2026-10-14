@@ -17,6 +17,7 @@ import (
 	"github.com/agoda-com/macOS-vz-kubelet/internal/nodeauth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/nodehealth"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/provider"
@@ -351,8 +352,17 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		}
 		cachePath = filepath.Join(cachePath, appIdentifier)
 
+		podVolumesDir, err := volumes.ResolvePodVolumesDir(cachePath)
+		if err != nil {
+			return nil, nil, err
+		}
+		// remove stale pod volumes but keep the directory itself (it may be a virtiofs share)
+		if err := volumes.PreparePodVolumesDir(podVolumesDir); err != nil {
+			return nil, nil, err
+		}
+
 		networkInterfaceIdentifier := os.Getenv("VZ_BRIDGE_INTERFACE")
-		vzClient := client.NewVzClientAPIs(ctx, eventRecorder, networkInterfaceIdentifier, cachePath, dockerCl)
+		vzClient := client.NewVzClientAPIs(ctx, eventRecorder, networkInterfaceIdentifier, cachePath, podVolumesDir, dockerCl)
 
 		providerConfig := provider.MacOSVZProviderConfig{
 			NodeName:           nodeName,

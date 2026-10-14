@@ -5,6 +5,7 @@ import (
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -12,40 +13,78 @@ import (
 // defaultTokenExpirationSeconds is the kubelet default for projected tokens.
 const defaultTokenExpirationSeconds = 3607
 
-// extractPodCredentials extracts the service account token and config maps required for the Pod.
-func (p *MacOSVZProvider) extractPodCredentials(ctx context.Context, pod *corev1.Pod) (map[string]*corev1.ConfigMap, string, error) {
+// extractPodCredentials extracts the service account token, config maps and secrets required for the Pod's volumes.
+func (p *MacOSVZProvider) extractPodCredentials(ctx context.Context, pod *corev1.Pod) (map[string]*corev1.ConfigMap, map[string]*corev1.Secret, string, error) {
 	var serviceAccountToken string
 	configMaps := map[string]*corev1.ConfigMap{}
+	secrets := map[string]*corev1.Secret{}
+
+	cmRefs, secretRefs := findObjectRefs(pod)
+	// Per-object GETs only: the Node authorizer allows these for objects referenced by the Pod.
+	for name, optional := range cmRefs {
+		cm, err := p.k8sClient.CoreV1().ConfigMaps(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if optional && apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, nil, "", err
+		}
+		configMaps[name] = cm
+	}
+	for name, optional := range secretRefs {
+		sec, err := p.k8sClient.CoreV1().Secrets(pod.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if optional && apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, nil, "", err
+		}
+		secrets[name] = sec
+	}
 
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
-		svcProj, cmProj := findProjections(pod)
-		if err := p.populateConfigMaps(ctx, pod.Namespace, cmProj, configMaps); err != nil {
-			return nil, "", err
-		}
-
-		if svcProj != nil {
+		if svcProj, _ := findProjections(pod); svcProj != nil {
 			token, err := p.createServiceAccountToken(ctx, pod, svcProj)
 			if err != nil {
-				return nil, "", err
+				return nil, nil, "", err
 			}
 			serviceAccountToken = token
 		}
 	}
 
-	return configMaps, serviceAccountToken, nil
+	return configMaps, secrets, serviceAccountToken, nil
 }
 
-// populateConfigMaps fetches and populates the config maps based on the ConfigMapProjection.
-func (p *MacOSVZProvider) populateConfigMaps(ctx context.Context, namespace string, cmProj *corev1.ConfigMapProjection, configMaps map[string]*corev1.ConfigMap) error {
-	if cmProj != nil {
-		// use core client directly instead of lister due to better nature of caching
-		configMap, err := p.k8sClient.CoreV1().ConfigMaps(namespace).Get(ctx, cmProj.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
+// findObjectRefs returns the config maps and secrets named by plain and projected volumes,
+// mapped to whether every reference to them is optional.
+func findObjectRefs(pod *corev1.Pod) (cms, secrets map[string]bool) {
+	cms, secrets = map[string]bool{}, map[string]bool{}
+	add := func(m map[string]bool, name string, optional *bool) {
+		opt := optional != nil && *optional
+		if prev, ok := m[name]; ok {
+			opt = opt && prev
 		}
-		configMaps[cmProj.Name] = configMap
+		m[name] = opt
 	}
-	return nil
+	for _, vol := range pod.Spec.Volumes {
+		if vol.ConfigMap != nil {
+			add(cms, vol.ConfigMap.Name, vol.ConfigMap.Optional)
+		}
+		if vol.Secret != nil {
+			add(secrets, vol.Secret.SecretName, vol.Secret.Optional)
+		}
+		if vol.Projected != nil {
+			for _, src := range vol.Projected.Sources {
+				if src.ConfigMap != nil {
+					add(cms, src.ConfigMap.Name, src.ConfigMap.Optional)
+				}
+				if src.Secret != nil {
+					add(secrets, src.Secret.Name, src.Secret.Optional)
+				}
+			}
+		}
+	}
+	return cms, secrets
 }
 
 // createServiceAccountToken creates a token for the service account.
