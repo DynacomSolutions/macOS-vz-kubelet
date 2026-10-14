@@ -306,6 +306,7 @@ shutdown. Provide one of the key variables or `VZ_SSH_PASSWORD`.
 | `VZ_SSH_PASSWORD`               |          |                   | Password authentication (fallback when no key is set).                      |
 | `VZ_SSH_KEX_ALGORITHMS`         |          | Go SSH defaults   | Comma-separated KEX algorithm override (advanced troubleshooting).          |
 | `VZ_SSH_DIAL_TIMEOUT`           |          | `5s`              | Cap on TCP connect plus SSH handshake. Keeps `exec`/`attach` off an unreachable VM. |
+| `VZ_MIN_FREE_BYTES`            |          | `16106127360` (15 GiB) | Free-space floor on the image cache volume. A pull that would leave less is refused (after evicting unused cached images, least recently used first); a pull that drops below it is aborted. `0` disables. |
 | `VZ_SSH_READINESS_TIMEOUT`      |          | `60s`             | Overall cap on the post-start SSH readiness loop. On expiry the pod fails.  |
 | `VZ_POSTSTART_TIMEOUT`          |          | `10s`             | Timeout for the postStart hook exec only.                                   |
 | `TERM`                          |          | `xterm-256color`  | Terminal type for interactive `exec`/`attach`.                             |

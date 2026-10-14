@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -36,6 +37,11 @@ type Params struct {
 	IgnoreExisiting bool
 	Credentials     resource.RegistryCredentials
 
+	// MinFreeBytes is the free-space floor on the cache volume; 0 disables the guard.
+	MinFreeBytes uint64
+	// InUse lists cached image directories that must never be evicted.
+	InUse []string
+
 	MinRetryDelay time.Duration
 	MaxDelay      time.Duration
 	MaxAttempts   int
@@ -61,7 +67,11 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		params.MaxAttempts = DefaultMaxAttempts
 	}
 
-	store, err := oci.New(filepath.Join(params.StorePath, "blobs", convertToPath(params.Ref)), params.IgnoreExisiting, eventRecorder)
+	imageDir := filepath.Join(params.StorePath, "blobs", convertToPath(params.Ref))
+	_, statErr := os.Stat(imageDir)
+	createdDir := statErr != nil // a failed pull must only remove a directory it created
+
+	store, err := oci.New(imageDir, params.IgnoreExisiting, eventRecorder)
 	if err != nil {
 		return cfg, fmt.Errorf("failed to initialize store: %w", err)
 	}
@@ -69,6 +79,7 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		err = errors.Join(err, store.Close(ctx))
 	}()
 
+	var spaceErr error
 	err = wait.ExponentialBackoffWithContext(ctx, wait.Backoff{
 		Duration: params.MinRetryDelay, // Base delay to start with
 		Factor:   DefaultFactor,        // Factor to increase the delay between retries
@@ -76,7 +87,11 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		Steps:    params.MaxAttempts,   // Maximum number of retry attempts
 		Cap:      params.MaxDelay,      // Maximum delay between retries
 	}, func(ctx context.Context) (done bool, _ error) { // never use condition error
-		err = pull(ctx, params.Ref, store, params.Credentials)
+		err = guardedPull(ctx, params, imageDir, store)
+		if errors.Is(err, ErrInsufficientSpace) {
+			spaceErr = err // permanent: do not retry
+			return true, nil
+		}
 		if err != nil {
 			// log error, but do not return it to continue retrying
 			eventRecorder.FailedToPullImage(ctx, params.Ref, "", err)
@@ -84,9 +99,18 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		return err == nil, nil
 	})
 
+	if spaceErr != nil {
+		if createdDir {
+			_ = os.RemoveAll(imageDir)
+		}
+		return cfg, spaceErr
+	}
 	if err != nil {
 		return cfg, err
 	}
+	// Mark the image as used now, so eviction order is least recently used first.
+	now := time.Now()
+	_ = os.Chtimes(imageDir, now, now)
 
 	blkStoragePath, err := store.GetFilePathForMediaType(ctx, oci.MediaTypeDiskImage)
 	if err != nil {
@@ -116,17 +140,29 @@ func ValidateImageReference(ref string) error {
 	return err
 }
 
-// pull pulls an OCI image from a remote repository and stores it in the local store.
-func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) (err error) {
-	ctx, span := trace.StartSpan(ctx, "OCI.pull")
-	defer func() {
-		span.SetStatus(err)
-		span.End()
-	}()
+// guardedPull checks free space (evicting unused images if needed), then pulls
+// while watching that free space stays above the floor.
+func guardedPull(ctx context.Context, params Params, imageDir string, store *oci.Store) error {
+	if params.MinFreeBytes == 0 {
+		return pull(ctx, params.Ref, store, params.Credentials)
+	}
+	if err := ensureSpace(ctx, params, imageDir); err != nil {
+		return err
+	}
+	pullCtx, stop := watchFreeSpace(ctx, params.StorePath, params.MinFreeBytes)
+	defer stop()
+	err := pull(pullCtx, params.Ref, store, params.Credentials)
+	if cause := context.Cause(pullCtx); err != nil && errors.Is(cause, ErrInsufficientSpace) {
+		return cause
+	}
+	return err
+}
 
+// newRepository builds the remote repository for ref with the given credentials.
+func newRepository(ref string, creds resource.RegistryCredentials) (*remote.Repository, error) {
 	repo, err := remote.NewRepository(ref)
 	if err != nil {
-		return fmt.Errorf("failed to create repository from reference %s: %w", ref, err)
+		return nil, fmt.Errorf("failed to create repository from reference %s: %w", ref, err)
 	}
 	// Determine if the repository is using plain HTTP based on if it's localhost or a local IP
 	repo.PlainHTTP = isLocalhostOrLocalIP(repo.Reference.Registry)
@@ -135,6 +171,21 @@ func pull(ctx context.Context, ref string, store *oci.Store, creds resource.Regi
 		repo.Client = &auth.Client{
 			Credential: auth.StaticCredential(repo.Reference.Registry, toORASCredential(creds)),
 		}
+	}
+	return repo, nil
+}
+
+// pull pulls an OCI image from a remote repository and stores it in the local store.
+func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) (err error) {
+	ctx, span := trace.StartSpan(ctx, "OCI.pull")
+	defer func() {
+		span.SetStatus(err)
+		span.End()
+	}()
+
+	repo, err := newRepository(ref, creds)
+	if err != nil {
+		return err
 	}
 
 	ctx = auth.AppendRepositoryScope(ctx, repo.Reference, auth.ActionPull)
