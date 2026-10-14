@@ -51,6 +51,10 @@ func (c *MacOSClient) acquirePermit(ctx context.Context, key types.NamespacedNam
 				log.G(ctx).WithError(err).Warn("failed to mark VM permit as acquired")
 				return nil, err
 			}
+			// shortcut: a Delete racing between the send above and markPermitAcquired (its
+			// releasePermit sees PermitAcquired=false, then Delete removes the entry) strands
+			// this token, lowering capacity until restart; fixing it needs a per-guard token
+			// owner shared with Delete, upgrade if pods are often deleted while still waiting.
 			return &permitGuard{client: c, key: key}, nil
 		case <-ticker.C:
 			log.G(ctx).Debug("waiting for resources to be available")

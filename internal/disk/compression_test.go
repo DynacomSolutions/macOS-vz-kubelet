@@ -172,3 +172,35 @@ func TestDecompressReaderCapsOutputAtDeclaredSize(t *testing.T) {
 	_, err = disk.DecompressReader(context.Background(), &gz, filepath.Join(t.TempDir(), "out"), 10)
 	assert.ErrorContains(t, err, "exceeds declared size")
 }
+
+func TestCompressToWriterIsDeterministicAndStreams(t *testing.T) {
+	ctx := context.Background()
+	in := createTempFileWithContent(t, string(bytes.Repeat([]byte("macos-vz-build"), 200000)))
+
+	// pass 1: digest and size only
+	first, err := disk.CompressToWriter(ctx, in, io.Discard)
+	require.NoError(t, err)
+
+	// pass 2: the same bytes, matching pass 1
+	var out bytes.Buffer
+	second, err := disk.CompressToWriter(ctx, in, &out)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+	assert.Equal(t, int64(out.Len()), second.CompressedSize)
+	assert.Equal(t, digest.FromBytes(out.Bytes()), second.GzDigest)
+
+	// and it is valid gzip of the input
+	zr, err := gzip.NewReader(&out)
+	require.NoError(t, err)
+	got, err := io.ReadAll(zr)
+	require.NoError(t, err)
+	assert.Equal(t, digest.FromBytes(got), second.UncompressedDigest)
+	assert.Equal(t, int64(len(got)), second.UncompressedSize)
+}
+
+func TestCompressToWriterStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := disk.CompressToWriter(ctx, createTempFileWithContent(t, "data"), io.Discard)
+	assert.ErrorIs(t, err, context.Canceled)
+}

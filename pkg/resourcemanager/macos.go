@@ -320,8 +320,9 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 	// let the Go finalizer release the VZVirtualMachine (Code-Hex/vz has no explicit release).
 	defer runtime.GC()
 
-	// Delete must execute before releasePermit (defers are LIFO).
-	// releasePermit handles the missing-entry case via non-blocking channel drain.
+	// Defers are LIFO: releasePermit runs first, then vms.Delete. releasePermit needs the entry
+	// (it releases only a permit the entry records as acquired, and never drains for a missing
+	// entry), so Delete must not run before it: reordering would leak every permit.
 	defer c.vms.Delete(namespace, name)
 	defer c.releasePermit(ctx, types.NamespacedName{Namespace: namespace, Name: name})
 

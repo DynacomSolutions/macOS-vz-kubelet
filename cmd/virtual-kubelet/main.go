@@ -86,6 +86,12 @@ var (
 )
 
 func main() {
+	// build-image is a root-only maintenance command, not the provider: handle it before any
+	// Kubernetes client is created.
+	if len(os.Args) > 1 && os.Args[1] == "build-image" {
+		os.Exit(buildImageMain(os.Args[2:]))
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 

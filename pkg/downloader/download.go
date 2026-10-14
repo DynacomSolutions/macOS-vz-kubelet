@@ -68,10 +68,9 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		params.MaxAttempts = DefaultMaxAttempts
 	}
 
-	blobsRoot := filepath.Join(params.StorePath, "blobs")
-	imageDir := filepath.Join(blobsRoot, convertToPath(params.Ref))
-	if rel, relErr := filepath.Rel(blobsRoot, imageDir); relErr != nil || !filepath.IsLocal(rel) || rel == "." {
-		return cfg, fmt.Errorf("image reference %q maps outside the cache", params.Ref)
+	imageDir, err := ImageDir(params.StorePath, params.Ref)
+	if err != nil {
+		return cfg, err
 	}
 	_, statErr := os.Stat(imageDir)
 	createdDir := statErr != nil // a failed pull must only remove a directory it created

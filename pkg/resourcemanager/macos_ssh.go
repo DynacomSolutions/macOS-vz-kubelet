@@ -27,21 +27,30 @@ func (c *MacOSClient) sshDialFunc(namespace, name string) sshconn.DialFunc {
 		if ipAddr == "" {
 			return nil, errdefs.InvalidInputf("virtual machine does not have an IP address")
 		}
-		sshUser, sshAuth, err := getSSHAuthMethods()
+		config, err := SSHClientConfig()
 		if err != nil {
 			return nil, err
 		}
-		config := &ssh.ClientConfig{
-			User:            sshUser,
-			Auth:            sshAuth,
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-			Timeout:         envcfg.SSHDialTimeout(),
-		}
-		if kexList := strings.TrimSpace(os.Getenv("VZ_SSH_KEX_ALGORITHMS")); kexList != "" {
-			config.KeyExchanges = strings.Split(kexList, ",")
-		}
 		return vzssh.DialContext(ctx, "tcp", ipAddr+":22", config)
 	}
+}
+
+// SSHClientConfig builds the guest SSH client config from the VZ_SSH_* environment variables.
+func SSHClientConfig() (*ssh.ClientConfig, error) {
+	sshUser, sshAuth, err := getSSHAuthMethods()
+	if err != nil {
+		return nil, err
+	}
+	config := &ssh.ClientConfig{
+		User:            sshUser,
+		Auth:            sshAuth,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         envcfg.SSHDialTimeout(),
+	}
+	if kexList := strings.TrimSpace(os.Getenv("VZ_SSH_KEX_ALGORITHMS")); kexList != "" {
+		config.KeyExchanges = strings.Split(kexList, ",")
+	}
+	return config, nil
 }
 
 // getSSHAuthMethods retrieves SSH auth methods from environment variables.
