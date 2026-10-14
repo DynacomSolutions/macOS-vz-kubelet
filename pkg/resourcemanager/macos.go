@@ -226,12 +226,23 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 func (c *MacOSClient) stopAfterPostStart(ctx context.Context, params VirtualMachineParams, hookErr error) {
 	logger := log.G(ctx)
 	code, hasCode := hookExitStatus(hookErr)
-	info, _ := c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	// The hook error is stored with the exit code and BEFORE the stop, so State() never shows
+	// Terminated without an error for a failed hook.
+	info, found := c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		if hasCode {
 			i.Resource.SetHookExitCode(code)
 		}
+		if hookErr != nil {
+			i.Resource.SetError(hookErr)
+		}
 		return i
 	})
+	if !found {
+		// The pod was deleted meanwhile: DeleteVirtualMachine already stopped the VM and released
+		// its permit. Releasing again would take another VM's permit.
+		logger.Debug("virtual machine info expired; nothing to stop after the postStart hook")
+		return
+	}
 	if instance := info.Resource.Instance(); instance != nil {
 		// The pod context may be cancelled by now; the stop must still happen.
 		if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
