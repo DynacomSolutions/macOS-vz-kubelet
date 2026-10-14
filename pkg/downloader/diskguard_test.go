@@ -1,6 +1,7 @@
 package downloader
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,17 +39,27 @@ func TestRequiredBytes(t *testing.T) {
 	require.NoError(t, os.Chtimes(disk, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)))
 	assert.Equal(t, uint64(5), requiredBytes(layers, dir, false))
 	assert.Equal(t, uint64(45), requiredBytes(layers, dir, true))
+
+	// a fresh sidecar holding a different digest (re-pushed tag) is not cached.
+	require.NoError(t, os.WriteFile(disk+".digest", []byte("sha256:other"), 0o600))
+	later := time.Now().Add(time.Hour)
+	require.NoError(t, os.Chtimes(disk+".digest", later, later))
+	assert.Equal(t, uint64(45), requiredBytes(layers, dir, false))
+	removeStale(layers, dir, false)
+	assert.NoFileExists(t, disk, "the old file is cleared, not kept beside the new one")
+	assert.NoFileExists(t, disk+".digest")
 }
 
 func TestRemoveStale(t *testing.T) {
 	dir := t.TempDir()
 	layers := []ocispec.Descriptor{
 		{Annotations: map[string]string{ocispec.AnnotationTitle: "stale.img"}},
-		{Annotations: map[string]string{ocispec.AnnotationTitle: "good.img"}},
+		{Digest: "sha256:good", Annotations: map[string]string{ocispec.AnnotationTitle: "good.img"}},
 	}
 	for _, f := range []string{"stale.img", "stale.img.partial-abc", "stale.img.partial", "good.img", "good.img.digest"} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600))
 	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "good.img.digest"), []byte("sha256:good"), 0o600))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(filepath.Join(dir, "good.img"), old, old))
 
@@ -184,4 +195,24 @@ func TestReservationsCountOnlyUnwrittenBytes(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "more"), make([]byte, 2<<30), 0o600))
 	assert.Equal(t, uint64(0), reservedBytes())
 	assert.Equal(t, uint64(10), unreserved(10), "no reservation left, all free space is available")
+}
+
+func TestLockImageSerialisesSameDir(t *testing.T) {
+	ctx := context.Background()
+	unlock, err := lockImage(ctx, "dirA")
+	require.NoError(t, err)
+
+	other, err := lockImage(ctx, "dirB")
+	require.NoError(t, err, "a different dir is not blocked")
+	other()
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	_, err = lockImage(waitCtx, "dirA")
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "same dir waits for the first to finish")
+
+	unlock()
+	again, err := lockImage(ctx, "dirA")
+	require.NoError(t, err)
+	again()
 }

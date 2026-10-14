@@ -139,7 +139,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 	// Refuse images outside VZ_ALLOWED_IMAGE_PREFIXES before anything is pulled, so a
 	// Pod that tolerates every taint cannot run an arbitrary image on this host.
 	if !linuxOnly {
-		prefixes := envcfg.AllowedImagePrefixes()
+		prefixes, _ := envcfg.AllowedImagePrefixes() // validated at startup
 		for _, cs := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 			for _, ct := range cs {
 				if !envcfg.ImageAllowed(prefixes, ct.Image) {

@@ -7,13 +7,23 @@ import (
 )
 
 func TestParseImagePrefixes(t *testing.T) {
-	assert.Empty(t, ParseImagePrefixes(""))
-	assert.Empty(t, ParseImagePrefixes(" , ,"))
-	assert.Equal(t, []string{"a/", "b/c/"}, ParseImagePrefixes(" a/ , b/c/,"))
+	got, err := ParseImagePrefixes("")
+	assert.NoError(t, err)
+	assert.Empty(t, got)
+	got, err = ParseImagePrefixes(" , ,")
+	assert.NoError(t, err)
+	assert.Empty(t, got)
+	got, err = ParseImagePrefixes(" a/ , b/c/,")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"a/", "b/c/"}, got)
+	for _, bad := range []string{"a", "a/,b", "registry.s.dynacom.dev/macos-vz"} {
+		_, err = ParseImagePrefixes(bad)
+		assert.Error(t, err, bad)
+	}
 }
 
 func TestImageAllowed(t *testing.T) {
-	p := ParseImagePrefixes("registry.s.dynacom.dev/macos-vz/")
+	p, _ := ParseImagePrefixes("registry.s.dynacom.dev/macos-vz/")
 	assert.True(t, ImageAllowed(p, "registry.s.dynacom.dev/macos-vz/tahoe-xcode:26"))
 	assert.False(t, ImageAllowed(p, "registry.s.dynacom.dev.evil.com/macos-vz/x:1"))
 	assert.False(t, ImageAllowed(p, "registry.s.dynacom.dev/macos-vz-evil/x:1"))
@@ -21,5 +31,5 @@ func TestImageAllowed(t *testing.T) {
 	assert.False(t, ImageAllowed(p, "alpine:3"))
 	assert.False(t, ImageAllowed(p, ""))
 	assert.True(t, ImageAllowed(nil, "anything"), "empty list keeps upstream behaviour")
-	assert.True(t, ImageAllowed(ParseImagePrefixes("x/,registry.s.dynacom.dev/macos-vz/"), "registry.s.dynacom.dev/macos-vz/a"))
+	assert.True(t, ImageAllowed([]string{"x/", "registry.s.dynacom.dev/macos-vz/"}, "registry.s.dynacom.dev/macos-vz/a"))
 }

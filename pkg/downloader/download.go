@@ -151,6 +151,11 @@ func guardedPull(ctx context.Context, params Params, imageDir string, store *oci
 	if params.MinFreeBytes == 0 {
 		return pull(ctx, params.Ref, store, params.Credentials)
 	}
+	unlock, err := lockImage(ctx, imageDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	release, pin, err := ensureSpace(ctx, params, imageDir)
 	if err != nil {
 		return err

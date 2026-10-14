@@ -96,9 +96,19 @@ func freeBytes(path string) (uint64, error) {
 	return uint64(st.Bsize) * uint64(st.Bavail), nil // nolint: gosec
 }
 
+// wantDigest is the digest the layer output must have: the uncompressed digest for a
+// compressed layer, else the layer digest. It is what the sidecar records.
+func wantDigest(l ocispec.Descriptor) string {
+	if d := l.Annotations[oci.AnnotationUncompressedDigest]; d != "" {
+		return d
+	}
+	return l.Digest.String()
+}
+
 // isCached reports whether the layer output is already in dir and validated: its
-// digest sidecar is newer than the file, the same test ValidateFileWithDigest uses to
-// skip rehashing. A bare file with no sidecar is a partial from an aborted pull.
+// digest sidecar is newer than the file (the test ValidateFileWithDigest uses to skip
+// rehashing) and records the expected digest, so a re-pushed tag is not taken for the
+// old content. A bare file with no sidecar is a partial from an aborted pull.
 func isCached(l ocispec.Descriptor, dir string) bool {
 	name := l.Annotations[ocispec.AnnotationTitle]
 	if name == "" {
@@ -108,8 +118,38 @@ func isCached(l ocispec.Descriptor, dir string) bool {
 	if err != nil {
 		return false
 	}
-	si, err := os.Stat(filepath.Join(dir, name+disk.DigestFileSuffix))
-	return err == nil && si.ModTime().After(fi.ModTime())
+	sidecar := filepath.Join(dir, name+disk.DigestFileSuffix)
+	si, err := os.Stat(sidecar)
+	if err != nil || !si.ModTime().After(fi.ModTime()) {
+		return false
+	}
+	got, err := os.ReadFile(sidecar)
+	return err == nil && string(got) == wantDigest(l)
+}
+
+// imageLocks serialises pulls per image dir, so two pulls of the same dir never overlap
+// and reservation attribution (bytes written in the dir) is exact.
+var (
+	imageLocksMu sync.Mutex
+	imageLocks   = map[string]chan struct{}{}
+)
+
+// lockImage waits for any other pull of dir to finish, then claims it. The returned
+// func releases it.
+func lockImage(ctx context.Context, dir string) (func(), error) {
+	imageLocksMu.Lock()
+	ch, ok := imageLocks[dir]
+	if !ok {
+		ch = make(chan struct{}, 1)
+		imageLocks[dir] = ch
+	}
+	imageLocksMu.Unlock()
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // requiredBytes is the peak extra disk a pull of layers needs. A compressed layer is
