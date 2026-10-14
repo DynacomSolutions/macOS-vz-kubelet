@@ -55,7 +55,7 @@ import (
 var (
 	appIdentifier = "com.agoda.fleet.virtualization"
 	buildVersion  = "dev"
-	k8sVersion    = "v1.35.6" // This should follow the version of k8s.io we are importing
+	k8sVersion    = "v1.36.5" // This should follow the version of k8s.io we are importing
 
 	taintKey    = envOrDefault("VKUBELET_TAINT_KEY", "virtual-kubelet.io/provider")
 	taintEffect = envOrDefault("VKUBELET_TAINT_EFFECT", string(corev1.TaintEffectNoSchedule))
