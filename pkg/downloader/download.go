@@ -151,14 +151,14 @@ func guardedPull(ctx context.Context, params Params, imageDir string, store *oci
 	if params.MinFreeBytes == 0 {
 		return pull(ctx, params.Ref, store, params.Credentials)
 	}
-	release, err := ensureSpace(ctx, params, imageDir)
+	release, pin, err := ensureSpace(ctx, params, imageDir)
 	if err != nil {
 		return err
 	}
 	defer release()
 	pullCtx, stop := watchFreeSpace(ctx, params.StorePath, params.MinFreeBytes)
 	defer stop()
-	err = pull(pullCtx, params.Ref, store, params.Credentials)
+	err = pullPinned(pullCtx, params.Ref, pin, store, params.Credentials)
 	if cause := context.Cause(pullCtx); err != nil && errors.Is(cause, ErrInsufficientSpace) {
 		return cause
 	}
@@ -183,7 +183,13 @@ func newRepository(ref string, creds resource.RegistryCredentials) (*remote.Repo
 }
 
 // pull pulls an OCI image from a remote repository and stores it in the local store.
-func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) (err error) {
+func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) error {
+	return pullPinned(ctx, ref, "", store, creds)
+}
+
+// pullPinned is pull from the manifest digest pin when set (the one the disk guard
+// estimated), so a retagged image cannot swap in a different size.
+func pullPinned(ctx context.Context, ref, pin string, store *oci.Store, creds resource.RegistryCredentials) (err error) {
 	ctx, span := trace.StartSpan(ctx, "OCI.pull")
 	defer func() {
 		span.SetStatus(err)
@@ -196,7 +202,11 @@ func pull(ctx context.Context, ref string, store *oci.Store, creds resource.Regi
 	}
 
 	ctx = auth.AppendRepositoryScope(ctx, repo.Reference, auth.ActionPull)
-	_, err = oras.Copy(ctx, repo, repo.Reference.Reference, store, repo.Reference.Reference, oras.DefaultCopyOptions)
+	src := repo.Reference.Reference
+	if pin != "" {
+		src = pin
+	}
+	_, err = oras.Copy(ctx, repo, src, store, repo.Reference.Reference, oras.DefaultCopyOptions)
 	if err != nil {
 		return err
 	}

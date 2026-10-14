@@ -46,7 +46,7 @@ func TestRemoveStale(t *testing.T) {
 		{Annotations: map[string]string{ocispec.AnnotationTitle: "stale.img"}},
 		{Annotations: map[string]string{ocispec.AnnotationTitle: "good.img"}},
 	}
-	for _, f := range []string{"stale.img", "stale.img.partial-abc", "good.img", "good.img.digest"} {
+	for _, f := range []string{"stale.img", "stale.img.partial-abc", "stale.img.partial", "good.img", "good.img.digest"} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600))
 	}
 	old := time.Now().Add(-time.Hour)
@@ -54,7 +54,7 @@ func TestRemoveStale(t *testing.T) {
 
 	removeStale(layers, dir, false)
 
-	for _, f := range []string{"stale.img", "stale.img.partial-abc"} {
+	for _, f := range []string{"stale.img", "stale.img.partial-abc", "stale.img.partial"} {
 		assert.NoFileExists(t, filepath.Join(dir, f))
 	}
 	for _, f := range []string{"good.img", "good.img.digest"} {
@@ -161,13 +161,27 @@ func TestEvictDirKeepsNestedImage(t *testing.T) {
 	assert.FileExists(t, filepath.Join(inner, "disk.img"), "a nested (possibly in-use) image must survive")
 }
 
-func TestUnreserved(t *testing.T) {
+func TestReservationsCountOnlyUnwrittenBytes(t *testing.T) {
 	guardMu.Lock()
 	defer guardMu.Unlock()
-	old := reserved
-	defer func() { reserved = old }()
 
-	reserved = 30 * gib
-	assert.Equal(t, 70*gib, unreserved(100*gib))
-	assert.Equal(t, uint64(0), unreserved(10*gib), "reservations above free must not underflow")
+	dir := t.TempDir()
+	// 100 KiB already allocated in the dir before the pull: the baseline.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "old"), make([]byte, 100<<10), 0o600))
+	r := &reservation{dir: dir, needed: 1 << 30, baseline: allocatedBytes(dir)}
+	reservations[r] = struct{}{}
+	defer delete(reservations, r)
+
+	assert.Equal(t, uint64(1<<30), reservedBytes(), "nothing written yet: full estimate reserved")
+	assert.Equal(t, uint64(1<<30), unreserved(2<<30), "free minus the reservation")
+	assert.Equal(t, uint64(0), unreserved(1<<20), "reservation above free must not underflow")
+
+	// the pull writes 10 MiB: that is already out of free space, so it is not reserved twice.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.partial-x"), make([]byte, 10<<20), 0o600))
+	assert.Equal(t, uint64(1<<30)-(10<<20), reservedBytes())
+
+	// written beyond the estimate never underflows.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "more"), make([]byte, 2<<30), 0o600))
+	assert.Equal(t, uint64(0), reservedBytes())
+	assert.Equal(t, uint64(10), unreserved(10), "no reservation left, all free space is available")
 }

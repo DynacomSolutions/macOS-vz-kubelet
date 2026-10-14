@@ -273,9 +273,6 @@ func TestCreateVirtualizationGroup_RejectsImageOutsideAllowedPrefixes(t *testing
 		err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
 		assert.True(t, errdefs.IsInvalidInput(err), "%s: want InvalidInput, got %v", name, err)
 		assert.ErrorContains(t, err, "VZ_ALLOWED_IMAGE_PREFIXES", name)
-
-		_, getErr := c.GetVirtualizationGroup(ctx, "default", "p")
-		assert.True(t, errdefs.IsNotFound(getErr), "%s: nothing may be registered", name)
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()

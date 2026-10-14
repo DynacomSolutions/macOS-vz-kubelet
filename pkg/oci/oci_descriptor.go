@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
 
@@ -89,4 +91,20 @@ func (s *Store) descriptorFromConfig(_ context.Context, cfg Config) (ocispec.Des
 			ocispec.AnnotationTitle: cfg.MediaType.Title(),
 		},
 	}, nil
+}
+
+// ParseUncompressedSize parses the uncompressed-size annotation: a positive decimal
+// number made of digits only. It is the single parser used by the guard and the store.
+func ParseUncompressedSize(s string) (int64, error) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, fmt.Errorf("invalid uncompressed size %q: want digits only", s)
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid uncompressed size %q: %w", s, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid uncompressed size %q: must be positive", s)
+	}
+	return n, nil
 }

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -31,16 +30,54 @@ var ErrInsufficientSpace = errors.New("insufficient free disk space")
 const diskPollInterval = time.Second
 
 // guardMu serialises estimate + eviction so concurrent pulls do not both spend
-// the same free space. reserved (guarded by guardMu) is the estimated bytes of pulls
-// in flight, subtracted from free space until they end.
+// the same free space. reservations (guarded by guardMu) are the pulls in flight.
 var (
-	guardMu  sync.Mutex
-	reserved uint64
+	guardMu      sync.Mutex
+	reservations = map[*reservation]struct{}{}
 )
 
-// unreserved returns free minus what other active pulls have reserved.
+// reservation is an active pull's claim on free space: its estimate, minus what it has
+// already written (allocated bytes in its image dir above the baseline at start), since
+// written bytes are already gone from free space.
+type reservation struct {
+	dir      string
+	needed   uint64
+	baseline uint64
+}
+
+func (r *reservation) remaining() uint64 {
+	written := allocatedBytes(r.dir)
+	written -= min(written, r.baseline)
+	return r.needed - min(r.needed, written)
+}
+
+// reservedBytes is the total still-unwritten bytes of pulls in flight; hold guardMu.
+func reservedBytes() (total uint64) {
+	for r := range reservations {
+		total += r.remaining()
+	}
+	return total
+}
+
+// unreserved returns free minus what other active pulls have yet to write.
 func unreserved(free uint64) uint64 {
-	return free - min(free, reserved)
+	return free - min(free, reservedBytes())
+}
+
+// allocatedBytes sums the allocated bytes of the regular files directly in dir
+// (allocated, not logical: decompressed disks are sparse).
+func allocatedBytes(dir string) (total uint64) {
+	files, _ := os.ReadDir(dir)
+	for _, f := range files {
+		if info, err := f.Info(); err == nil && f.Type().IsRegular() {
+			if st, ok := info.Sys().(*syscall.Stat_t); ok {
+				total += uint64(st.Blocks) * 512 // nolint: gosec
+			} else {
+				total += uint64(info.Size()) // nolint: gosec
+			}
+		}
+	}
+	return total
 }
 
 // cacheEntry is one cached image directory.
@@ -88,8 +125,8 @@ func requiredBytes(layers []ocispec.Descriptor, workingDir string, ignoreExistin
 			continue
 		}
 		_, hasDigest := l.Annotations[oci.AnnotationUncompressedDigest]
-		if u, err := strconv.ParseUint(l.Annotations[oci.AnnotationUncompressedSize], 10, 64); err == nil && hasDigest {
-			total += u
+		if u, err := oci.ParseUncompressedSize(l.Annotations[oci.AnnotationUncompressedSize]); err == nil && hasDigest {
+			total += uint64(u)
 		} else {
 			total += uint64(max(l.Size, 0)) // nolint: gosec
 		}
@@ -105,7 +142,7 @@ func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
 		if name == "" || (!ignoreExisting && isCached(l, dir)) {
 			continue
 		}
-		for _, f := range []string{name, name + disk.DigestFileSuffix} {
+		for _, f := range []string{name, name + disk.DigestFileSuffix, name + ".partial"} { // .partial: v8 fixed name
 			_ = os.Remove(filepath.Join(dir, f))
 		}
 		partials, _ := filepath.Glob(filepath.Join(dir, name+".partial-*"))
@@ -148,21 +185,7 @@ func listCache(root string) (entries []cacheEntry) {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
 		}
-		files, err := os.ReadDir(p)
-		if err != nil {
-			return nil
-		}
-		e := cacheEntry{dir: p}
-		for _, f := range files {
-			if info, err := f.Info(); err == nil && f.Type().IsRegular() {
-				// allocated bytes, not logical size: decompressed disks are sparse
-				if st, ok := info.Sys().(*syscall.Stat_t); ok {
-					e.size += uint64(st.Blocks) * 512 // nolint: gosec
-				} else {
-					e.size += uint64(info.Size()) // nolint: gosec
-				}
-			}
-		}
+		e := cacheEntry{dir: p, size: allocatedBytes(p)}
 		if e.size == 0 {
 			return nil
 		}
@@ -197,65 +220,70 @@ func evictDir(dir string) error {
 // fetchLayers reads the image manifest and returns its layers, all with safe titles.
 // Image indexes are refused: the pull would copy every platform and the size cannot be
 // bounded up front.
-func fetchLayers(ctx context.Context, ref string, creds resource.RegistryCredentials) ([]ocispec.Descriptor, error) {
+func fetchLayers(ctx context.Context, ref string, creds resource.RegistryCredentials) (ocispec.Descriptor, []ocispec.Descriptor, error) {
 	repo, err := newRepository(ref, creds)
 	if err != nil {
-		return nil, err
+		return ocispec.Descriptor{}, nil, err
 	}
 	desc, rc, err := repo.FetchReference(ctx, repo.Reference.Reference)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
+		return desc, nil, fmt.Errorf("failed to fetch manifest: %w", err)
 	}
 	defer rc.Close()
 	if desc.MediaType != ocispec.MediaTypeImageManifest {
-		return nil, fmt.Errorf("unsupported manifest media type %q: image indexes are not supported", desc.MediaType)
+		return desc, nil, fmt.Errorf("unsupported manifest media type %q: image indexes are not supported", desc.MediaType)
 	}
 	b, err := content.ReadAll(rc, desc)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
+		return desc, nil, fmt.Errorf("failed to read manifest: %w", err)
 	}
 	var m ocispec.Manifest
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("failed to decode manifest: %w", err)
+		return desc, nil, fmt.Errorf("failed to decode manifest: %w", err)
 	}
 	for _, l := range m.Layers {
 		if err := oci.ValidateTitle(l); err != nil {
-			return nil, err
+			return desc, nil, err
+		}
+		if v, ok := l.Annotations[oci.AnnotationUncompressedSize]; ok {
+			if _, err := oci.ParseUncompressedSize(v); err != nil {
+				return desc, nil, err
+			}
 		}
 	}
-	return m.Layers, nil
+	return desc, m.Layers, nil
 }
 
 // ensureSpace refuses the pull unless it fits above the floor, evicting unused
 // cached images (LRU first) when that makes it fit. On success the pull's estimate is
 // reserved until the returned release is called.
-func ensureSpace(ctx context.Context, params Params, imageDir string) (release func(), err error) {
+func ensureSpace(ctx context.Context, params Params, imageDir string) (release func(), pin string, err error) {
 	guardMu.Lock()
 	defer guardMu.Unlock()
 
-	layers, err := fetchLayers(ctx, params.Ref, params.Credentials)
+	desc, layers, err := fetchLayers(ctx, params.Ref, params.Credentials)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	removeStale(layers, imageDir, params.IgnoreExisiting)
 	needed := requiredBytes(layers, imageDir, params.IgnoreExisiting)
 	root := filepath.Join(params.StorePath, "blobs")
 	if err := os.MkdirAll(root, os.ModePerm); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	free, err := freeBytes(root)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read free disk space: %w", err)
+		return nil, "", fmt.Errorf("failed to read free disk space: %w", err)
 	}
 	logger := log.G(ctx)
 	avail := unreserved(free)
-	refuse := func(avail uint64) (func(), error) {
-		logger.Warnf("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: refusing", params.Ref, needed, avail, free, reserved, params.MinFreeBytes)
-		return nil, fmt.Errorf("%w: pull of %s needs %d bytes, %d available, floor %d, and no unused cached image can be evicted to make room",
+	refuse := func(avail uint64) (func(), string, error) {
+		logger.Warnf("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: refusing", params.Ref, needed, avail, free, reservedBytes(), params.MinFreeBytes)
+		return nil, "", fmt.Errorf("%w: pull of %s needs %d bytes, %d available, floor %d, and no unused cached image can be evicted to make room",
 			ErrInsufficientSpace, params.Ref, needed, avail, params.MinFreeBytes)
 	}
 	if fits(avail, needed, params.MinFreeBytes) {
-		logger.Infof("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: pulling without eviction", params.Ref, needed, avail, free, reserved, params.MinFreeBytes)
+		logger.Infof("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: pulling without eviction", params.Ref, needed, avail, free, reservedBytes(), params.MinFreeBytes)
 	} else {
 		protected := map[string]bool{imageDir: true}
 		if params.InUse != nil {
@@ -267,16 +295,16 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) (release f
 		if !ok {
 			return refuse(avail)
 		}
-		logger.Infof("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: evicting %d unused image(s)", params.Ref, needed, avail, free, reserved, params.MinFreeBytes, len(evict))
+		logger.Infof("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: evicting %d unused image(s)", params.Ref, needed, avail, free, reservedBytes(), params.MinFreeBytes, len(evict))
 		for _, e := range evict {
 			logger.Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space for %s", e.dir, e.size, e.lastUsed.Format(time.RFC3339), params.Ref)
 			if err := evictDir(e.dir); err != nil {
-				return nil, fmt.Errorf("failed to evict %s: %w", e.dir, err)
+				return nil, "", fmt.Errorf("failed to evict %s: %w", e.dir, err)
 			}
 		}
 		// Re-measure: snapshots can keep deleted blocks allocated.
 		if free, err = freeBytes(root); err != nil {
-			return nil, fmt.Errorf("failed to read free disk space: %w", err)
+			return nil, "", fmt.Errorf("failed to read free disk space: %w", err)
 		}
 		avail = unreserved(free)
 		if !fits(avail, needed, params.MinFreeBytes) {
@@ -284,12 +312,13 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) (release f
 		}
 	}
 
-	reserved += needed
+	r := &reservation{dir: imageDir, needed: needed, baseline: allocatedBytes(imageDir)}
+	reservations[r] = struct{}{}
 	return func() {
 		guardMu.Lock()
 		defer guardMu.Unlock()
-		reserved -= min(reserved, needed)
-	}, nil
+		delete(reservations, r)
+	}, desc.Digest.String(), nil
 }
 
 // watchFreeSpace cancels the returned context with ErrInsufficientSpace if free
