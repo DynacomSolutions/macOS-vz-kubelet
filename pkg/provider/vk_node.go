@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/netutil"
@@ -127,7 +129,12 @@ func getNodeCapacity(ctx context.Context) (corev1.ResourceList, error) {
 	}
 	ephemeralStorage := *resource.NewQuantity(int64(d.Total), resource.BinarySI)
 
-	pods := *resource.NewQuantity(DefaultPods, resource.DecimalSI)
+	maxPods := int64(DefaultPods)
+	// Linux-only pods are not bound by the 2-VM cap, so the pod capacity can be raised.
+	if v, err := strconv.ParseInt(os.Getenv("VZ_NODE_MAX_PODS"), 10, 64); err == nil && v > 0 {
+		maxPods = v
+	}
+	pods := *resource.NewQuantity(maxPods, resource.DecimalSI)
 
 	return corev1.ResourceList{
 		corev1.ResourceCPU:              cpu,
