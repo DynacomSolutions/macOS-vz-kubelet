@@ -214,6 +214,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			Mounts:           mounts,
 			Env:              macOSContainer.Env,
 			PostStartAction:  postStartAction,
+			StopOnPostStart:  resource.StopsWhenPostStartExits(pod),
 			IgnoreImageCache: pullPolicy == corev1.PullAlways,
 			RegistryCreds:    vmCreds,
 		})

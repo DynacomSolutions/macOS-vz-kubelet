@@ -13,6 +13,17 @@ const LinuxOnlyAnnotation = "dynacom.dev/linux-only"
 // IsLinuxOnly reports whether the pod has no macOS VM as container 0.
 func IsLinuxOnly(pod *corev1.Pod) bool { return pod.Annotations[LinuxOnlyAnnotation] == "true" }
 
+// StopWhenPostStartExitsAnnotation makes the provider stop the macOS VM from the host when the
+// postStart hook exits, and report the container as terminated with the hook's exit code. It
+// replaces a guest power-off in the hook, which leaks a Virtualization.framework VM slot on
+// macOS 26.5 (the framework's active-VM counter is only decremented by a host-side stop).
+const StopWhenPostStartExitsAnnotation = "dynacom.dev/stop-when-poststart-exits"
+
+// StopsWhenPostStartExits reports whether the pod asks for the host-side stop described above.
+func StopsWhenPostStartExits(pod *corev1.Pod) bool {
+	return pod.Annotations[StopWhenPostStartExitsAnnotation] == "true"
+}
+
 // LinuxOnlyVM stands in for the absent macOS VM so the pod-status code sees a "running VM" with
 // the node IP (Docker container IPs live inside the Colima VM and are not routable from the cluster).
 type LinuxOnlyVM struct{ IP string }

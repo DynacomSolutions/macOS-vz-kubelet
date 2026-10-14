@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
+	utilexec "k8s.io/utils/exec"
 )
 
 // pollSSHReady is the extracted readiness loop; these cover it with a fake probe
@@ -316,4 +317,19 @@ func TestPollSSHReadyCancelErrorHasNoReadinessWaitPrefix(t *testing.T) {
 		"the cancel path must carry context.Canceled")
 	assert.NotContains(t, err.Error(), "readiness wait expired",
 		"cancellation is teardown, not a cap expiry: it must NOT get the readiness-wait prefix")
+}
+
+func TestHookExitStatus(t *testing.T) {
+	code, ok := hookExitStatus(nil)
+	assert.True(t, ok)
+	assert.Equal(t, 0, code)
+
+	code, ok = hookExitStatus(utilexec.CodeExitError{Err: errors.New("exit"), Code: 42})
+	assert.True(t, ok)
+	assert.Equal(t, 42, code)
+
+	_, ok = hookExitStatus(errors.New("transport failure"))
+	assert.False(t, ok, "no exit status: no code")
+	_, ok = hookExitStatus(context.DeadlineExceeded)
+	assert.False(t, ok)
 }

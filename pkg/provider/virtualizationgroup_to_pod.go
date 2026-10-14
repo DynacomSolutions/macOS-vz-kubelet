@@ -139,6 +139,20 @@ func (p *MacOSVZProvider) buildPodStatus(_ context.Context, vg *client.Virtualiz
 	}
 }
 
+// hookExitCoder is implemented by VMs that record the postStart hook's exit status.
+type hookExitCoder interface{ HookExitCode() *int }
+
+// terminatedExitCode is the exit code of a terminated macOS container: the postStart hook's
+// when it recorded one (stop-when-poststart-exits), else fallback.
+func terminatedExitCode(vm resource.VirtualMachine, fallback int32) int32 {
+	if h, ok := vm.(hookExitCoder); ok {
+		if code := h.HookExitCode(); code != nil {
+			return int32(*code) // nolint: gosec
+		}
+	}
+	return fallback
+}
+
 // vmToContainerState converts the macOS VM state to a Kubernetes container state.
 func vmToContainerState(vm resource.VirtualMachine, podCreationTime time.Time) corev1.ContainerState {
 	startTime := podCreationTime
@@ -174,7 +188,7 @@ func vmToContainerState(vm resource.VirtualMachine, podCreationTime time.Time) c
 	case resource.VirtualMachineStateTerminating, resource.VirtualMachineStateTerminated:
 		return corev1.ContainerState{
 			Terminated: &corev1.ContainerStateTerminated{
-				ExitCode:   0,
+				ExitCode:   terminatedExitCode(vm, 0),
 				Reason:     "Completed",
 				Message:    "VM is stopped",
 				StartedAt:  metav1.NewTime(startTime),
@@ -184,7 +198,7 @@ func vmToContainerState(vm resource.VirtualMachine, podCreationTime time.Time) c
 	case resource.VirtualMachineStateFailed:
 		return corev1.ContainerState{
 			Terminated: &corev1.ContainerStateTerminated{
-				ExitCode:   1,
+				ExitCode:   terminatedExitCode(vm, 1),
 				Reason:     "Error",
 				Message:    fmt.Sprintf("VM has failed: %v", vm.Error()),
 				StartedAt:  metav1.NewTime(startTime),

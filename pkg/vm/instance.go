@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/netutil"
@@ -31,6 +33,11 @@ type VirtualMachineInstance struct {
 	config  *config.VirtualMachineConfiguration
 
 	ipRetrievalCancelFunc context.CancelFunc
+
+	// hostStopRequested is set before the host asks Virtualization.framework to stop the VM,
+	// so a Stopped state seen without it is a guest-initiated shutdown.
+	hostStopRequested atomic.Bool
+	stopMu            sync.Mutex
 
 	*vz.VirtualMachine
 }
@@ -84,6 +91,11 @@ func (i *VirtualMachineInstance) handleStateChanges(ctx context.Context) {
 				currentTime := time.Now()
 				i.FinishedAt = &currentTime
 				logger.Debug("Virtual machine instance has finished")
+				if !i.hostStopRequested.Load() {
+					logger.Warn("Guest shut itself down: on macOS 26.5 Virtualization.framework does not release the VM slot " +
+						"of a guest-initiated shutdown, so this leaks one of the 2 active-VM slots until the host reboots; " +
+						"stop the VM from the host instead (annotation dynacom.dev/stop-when-poststart-exits)")
+				}
 				return
 			}
 		case <-ctx.Done():
@@ -109,6 +121,7 @@ func (i *VirtualMachineInstance) Start(ctx context.Context, opts ...vz.VirtualMa
 	err = i.retrieveIPAddress(ctx)
 	if err != nil {
 		// kill the virtual machine instance if we failed to retrieve the IP address
+		i.hostStopRequested.Store(true)
 		_ = i.VirtualMachine.Stop()
 		return fmt.Errorf("failed to retrieve IP address: %w", err)
 	}
@@ -144,8 +157,12 @@ func (i *VirtualMachineInstance) retrieveIPAddress(ctx context.Context) (err err
 	return nil
 }
 
-// Stop stops the virtual machine instance and removes the overlay files if they exist.
+// Stop stops the virtual machine from the host and removes the overlay files if they exist.
+// It is idempotent and safe to call concurrently.
 func (i *VirtualMachineInstance) Stop(ctx context.Context) (err error) {
+	i.stopMu.Lock()
+	defer i.stopMu.Unlock()
+
 	ctx, span := trace.StartSpan(ctx, "VirtualMachineInstance.Stop")
 	logger := log.G(ctx)
 	defer func() {
@@ -161,6 +178,7 @@ func (i *VirtualMachineInstance) Stop(ctx context.Context) (err error) {
 	if i.State() != vz.VirtualMachineStateStopped {
 		// force stop VM if it is not stopped already
 		logger.Debug("Force stopping VM")
+		i.hostStopRequested.Store(true)
 		err = i.VirtualMachine.Stop()
 	}
 
@@ -168,10 +186,10 @@ func (i *VirtualMachineInstance) Stop(ctx context.Context) (err error) {
 	logger.Debugf("Overlay block storage path: %s, overlay auxiliary storage path: %s", overlayBlockStoragePath, overlayAuxiliaryStoragePath)
 	if ok {
 		logger.Debugf("Removing overlay files: %s, %s", overlayBlockStoragePath, overlayAuxiliaryStoragePath)
-		if rmErr := os.Remove(overlayBlockStoragePath); rmErr != nil {
+		if rmErr := os.Remove(overlayBlockStoragePath); rmErr != nil && !os.IsNotExist(rmErr) {
 			err = errors.Join(err, rmErr)
 		}
-		if rmErr := os.Remove(overlayAuxiliaryStoragePath); rmErr != nil {
+		if rmErr := os.Remove(overlayAuxiliaryStoragePath); rmErr != nil && !os.IsNotExist(rmErr) {
 			err = errors.Join(err, rmErr)
 		}
 	}
