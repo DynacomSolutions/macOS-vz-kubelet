@@ -9,6 +9,7 @@ import (
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/netutil"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/utils"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resourcemanager"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -25,7 +26,8 @@ import (
 )
 
 const (
-	// DefaultPods is the default number of pods that can be run on a node.
+	// DefaultPods is the default number of pods that can be run on a node; Node capacity
+	// reports the configured VM cap (VZ_MAX_MACOS_VMS) instead.
 	// Limiting number of pods to Apple Virtualization.framework internal limit
 	DefaultPods = resourcemanager.MaxVirtualMachines
 
@@ -129,7 +131,7 @@ func getNodeCapacity(ctx context.Context) (corev1.ResourceList, error) {
 	}
 	ephemeralStorage := *resource.NewQuantity(int64(d.Total), resource.BinarySI)
 
-	maxPods := int64(DefaultPods)
+	maxPods := int64(vmcap.Configured())
 	// Linux-only pods are not bound by the 2-VM cap, so the pod capacity can be raised.
 	if v, err := strconv.ParseInt(os.Getenv("VZ_NODE_MAX_PODS"), 10, 64); err == nil && v > 0 {
 		maxPods = v

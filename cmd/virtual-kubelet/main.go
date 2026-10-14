@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/provider"
@@ -276,6 +277,10 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		attribute.String("taint.effect", taintEffect),
 		attribute.String("taint.value", taintValue),
 	); err != nil {
+		return err
+	}
+
+	if _, err := vmcap.FromEnv(); err != nil {
 		return err
 	}
 

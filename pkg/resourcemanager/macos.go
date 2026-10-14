@@ -10,6 +10,7 @@ import (
 	vmdata "github.com/agoda-com/macOS-vz-kubelet/internal/data/vm"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/node"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/sshconn"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/vmcap"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
@@ -26,9 +27,10 @@ import (
 )
 
 const (
-	// MaxVirtualMachines is the maximum number of virtual machines that can be created.
+	// MaxVirtualMachines is the default (licensed) number of virtual machines that can be created.
 	// This is a kernel level limitation by Apple and is enforced within Virtualization.framework.
-	MaxVirtualMachines = 2
+	// The effective cap is vmcap.Configured() (VZ_MAX_MACOS_VMS).
+	MaxVirtualMachines = vmcap.Default
 )
 
 // VirtualMachineParams encapsulates the parameters required for creating a virtual machine.
@@ -70,7 +72,7 @@ func NewMacOSClient(ctx context.Context, eventRecorder event.EventRecorder, netw
 		eventRecorder:              eventRecorder,
 		networkInterfaceIdentifier: networkInterfaceIdentifier,
 		downloadManager:            downloader.NewManager(eventRecorder, cachePath),
-		vmPermits:                  make(chan struct{}, MaxVirtualMachines),
+		vmPermits:                  make(chan struct{}, vmcap.Configured()),
 		vms:                        vmdata.NewVirtualMachineData(),
 	}
 }
