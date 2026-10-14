@@ -85,7 +85,9 @@ func (c *MacOSClient) releasePermit(ctx context.Context, key types.NamespacedNam
 	// shouldRelease is set inside the Compute callback, which executes synchronously,
 	// so it is safe to read after Compute returns.
 	shouldRelease := false
-	_, found := c.vms.Update(key.Namespace, key.Name, func(info vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	// No entry means nothing to release: whoever deleted it already released its permit, and
+	// draining here would take another VM's permit.
+	c.vms.Update(key.Namespace, key.Name, func(info vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		if info.PermitAcquired {
 			info.PermitAcquired = false
 			shouldRelease = true
@@ -99,16 +101,6 @@ func (c *MacOSClient) releasePermit(ctx context.Context, key types.NamespacedNam
 		if !ok {
 			log.G(ctx).WithField("namespace", key.Namespace).WithField("name", key.Name).
 				Warn("expected to release VM permit but channel was closed")
-		}
-		return
-	}
-
-	if !found {
-		select {
-		case <-c.vmPermits:
-			log.G(ctx).WithField("namespace", key.Namespace).WithField("name", key.Name).
-				Debug("released VM permit without metadata present")
-		default:
 		}
 	}
 }
