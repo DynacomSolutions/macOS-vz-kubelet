@@ -134,7 +134,8 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 	}()
 
 	// If the pod has regular containers, the ContainerClient must be available.
-	if len(pod.Spec.Containers) > 1 && c.ContainerClient == nil {
+	linuxOnly := resource.IsLinuxOnly(pod)
+	if (len(pod.Spec.Containers) > 1 || linuxOnly) && c.ContainerClient == nil {
 		return errdefs.InvalidInput("regular containers are not supported")
 	}
 
@@ -144,26 +145,28 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 	// bad image ref surfaces async as a Failed VM the controller force-deletes and
 	// recreates in a churn loop, and an invalid macOS container[0] still spawns sidecars.
 	macOSContainer := pod.Spec.Containers[0]
-	cpu, err := utils.ExtractCPURequest(macOSContainer.Resources.Requests)
-	if err != nil {
-		return errdefs.AsInvalidInput(err)
-	}
-	if _, err = vm.ValidateCPUCount(cpu); err != nil {
-		return errdefs.AsInvalidInput(err)
-	}
-	memorySize, err := utils.ExtractMemoryRequest(macOSContainer.Resources.Requests)
-	if err != nil {
-		return errdefs.AsInvalidInput(err)
-	}
-	if _, err = vm.ValidateMemorySize(memorySize); err != nil {
-		return errdefs.AsInvalidInput(err)
+	var cpu uint
+	var memorySize uint64
+	if !linuxOnly {
+		if cpu, err = utils.ExtractCPURequest(macOSContainer.Resources.Requests); err != nil {
+			return errdefs.AsInvalidInput(err)
+		}
+		if _, err = vm.ValidateCPUCount(cpu); err != nil {
+			return errdefs.AsInvalidInput(err)
+		}
+		if memorySize, err = utils.ExtractMemoryRequest(macOSContainer.Resources.Requests); err != nil {
+			return errdefs.AsInvalidInput(err)
+		}
+		if _, err = vm.ValidateMemorySize(memorySize); err != nil {
+			return errdefs.AsInvalidInput(err)
+		}
 	}
 	// Validate the macOS image ref with the same oras parser the pull uses, so a
 	// malformed ref fails create synchronously instead of registering a VM that then
 	// fails async and churns (force-delete -> recreate). Only container[0]: sidecar
 	// images are pulled by the Linux backend, whose parser expands Docker-Hub short
 	// names (redis:7) that this one rejects, so validating them here would false-reject.
-	if err = downloader.ValidateImageReference(macOSContainer.Image); err != nil {
+	if err = downloader.ValidateImageReference(macOSContainer.Image); err != nil && !linuxOnly {
 		return errdefs.InvalidInputf("invalid image reference %q: %v", macOSContainer.Image, err)
 	}
 
@@ -176,6 +179,9 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 
 	g := errgroup.Group{}
 	g.Go(func() error {
+		if linuxOnly {
+			return nil // no macOS VM: every container goes to the Docker side-car runtime
+		}
 		vmCreds, _ := creds.ForImage(macOSContainer.Image)
 
 		mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, macOSContainer, pod, serviceAccountToken, configMaps)
@@ -210,7 +216,11 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		})
 	})
 
-	for i := 1; i < len(pod.Spec.Containers); i++ {
+	firstDocker := 1
+	if linuxOnly {
+		firstDocker = 0
+	}
+	for i := firstDocker; i < len(pod.Spec.Containers); i++ {
 		container := pod.Spec.Containers[i]
 		g.Go(func() error {
 			containerCreds, _ := creds.ForImage(container.Image)
