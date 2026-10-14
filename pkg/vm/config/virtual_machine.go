@@ -267,6 +267,9 @@ func attachDirectorySharingDevicesConfiguration(ctx context.Context, config *vz.
 
 	sharedDirs := make(map[string]*vz.SharedDirectory, len(mounts))
 	for _, v := range mounts {
+		if err := v.Revalidate(); err != nil {
+			return err
+		}
 		sharedDir, err := vz.NewSharedDirectory(v.HostPath, v.ReadOnly)
 		if err != nil {
 			return fmt.Errorf("failed to create shared directory: %w", err)

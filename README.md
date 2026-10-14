@@ -321,7 +321,7 @@ shutdown. Provide one of the key variables or `VZ_SSH_PASSWORD`.
 
 | Variable                | Required | Default      | Description                                                                 |
 |-------------------------|:--------:|--------------|-----------------------------------------------------------------------------|
-| `VZ_HOSTPATH_ALLOWLIST` |          | (empty, deny)| Comma-separated absolute path prefixes that Pod `hostPath` volumes may use. |
+| `VZ_HOSTPATH_ALLOWLIST` |          | (empty, deny)| Comma-separated absolute path prefixes that Pod `hostPath` volumes may use. Symlinks below the prefix are refused and re-checked just before the VM or Docker opens the path; a swap in that last instant cannot be excluded. |
 
 The provider can run as root, so `hostPath` is deny-by-default. Each requested path is cleaned, `..` is
 refused, symlinks are resolved on the deepest existing ancestor, and the result must sit under an allowed

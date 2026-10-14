@@ -144,6 +144,12 @@ func (c *DockerClient) handleDockerContainerCreation(ctx context.Context, params
 		// Do nothing
 	}
 
+	for _, m := range params.Mounts {
+		if err := m.Revalidate(); err != nil {
+			c.eventRecorder.FailedToCreateContainer(ctx, params.Name, err)
+			return
+		}
+	}
 	config := createDockerContainerConfig(params)
 	hostConfig := createDockerHostConfigFromMounts(params.Mounts)
 	containerName := getUnderlyingContainerName(params.PodNamespace, params.PodName, params.Name)

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/virtual-kubelet/virtual-kubelet/log"
+	"golang.org/x/sys/unix"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -21,6 +22,8 @@ type Mount struct {
 	HostPath      string
 	ContainerPath string
 	ReadOnly      bool
+
+	HostPathPrefix string // set for hostPath volumes: resolved allowlist prefix for Revalidate
 }
 
 // CreateContainerMounts creates the mounts for a container based on the pod spec.
@@ -39,9 +42,13 @@ func CreateContainerMounts(ctx context.Context, podVolRoot string, container cor
 			ContainerPath: filepath.Join(mountSpec.MountPath, mountSpec.SubPath),
 			ReadOnly:      mountSpec.ReadOnly,
 		}
+		// Generated content is never writable by the container (or the VM).
+		if podVolSpec.ConfigMap != nil || podVolSpec.Secret != nil || podVolSpec.Projected != nil || podVolSpec.DownwardAPI != nil {
+			newMount.ReadOnly = true
+		}
 		// Iterate over the volume types we care about
 		if podVolSpec.HostPath != nil {
-			hostPath, err := resolveHostPath(podVolSpec.HostPath.Path)
+			hostPath, prefix, err := resolveHostPath(podVolSpec.HostPath.Path)
 			if err != nil {
 				return nil, err
 			}
@@ -50,42 +57,45 @@ func CreateContainerMounts(ctx context.Context, podVolRoot string, container cor
 				return nil, fmt.Errorf("error making hostPath for path %s: %w", hostPath, err)
 			}
 			newMount.HostPath = hostPath
+			newMount.HostPathPrefix = prefix
+			if err := newMount.Revalidate(); err != nil {
+				return nil, err
+			}
 		} else if podVolSpec.EmptyDir != nil {
 			// TODO: Currently ignores the SizeLimit
 			newMount.HostPath = filepath.Join(podVolRoot, mountSpec.Name)
-			if err := makeEmptyDir(newMount.HostPath); err != nil {
+			if err := makeEmptyDir(podVolRoot, mountSpec.Name); err != nil {
 				return nil, fmt.Errorf("error making emptyDir for path %s: %w", newMount.HostPath, err)
 			}
 		} else if podVolSpec.ConfigMap != nil || podVolSpec.Secret != nil {
 			newMount.HostPath = filepath.Join(podVolRoot, mountSpec.Name)
-			if err := os.MkdirAll(newMount.HostPath, PodVolPerms); err != nil {
+			if err := makeVolumeDir(podVolRoot, mountSpec.Name); err != nil {
 				return nil, fmt.Errorf("error making volume for path %s: %w", newMount.HostPath, err)
 			}
-			if err := writeObjectVolume(newMount.HostPath, podVolSpec, configMaps, secrets); err != nil {
+			if err := writeObjectVolume(podVolRoot, mountSpec.Name, podVolSpec, configMaps, secrets); err != nil {
 				return nil, err
 			}
 		} else if podVolSpec.Projected != nil {
 			newMount.HostPath = filepath.Join(podVolRoot, mountSpec.Name)
-			err := os.MkdirAll(newMount.HostPath, PodVolPerms)
-			if err != nil {
+			if err := makeVolumeDir(podVolRoot, mountSpec.Name); err != nil {
 				return nil, fmt.Errorf("error making projected for path %s: %w", newMount.HostPath, err)
 			}
 			for _, source := range podVolSpec.Projected.Sources {
 				if source.ServiceAccountToken != nil {
-					err := os.WriteFile(filepath.Join(newMount.HostPath, source.ServiceAccountToken.Path), []byte(serviceAccountToken), PodVolPerms)
+					err := writeFileUnder(podVolRoot, filepath.Join(mountSpec.Name, source.ServiceAccountToken.Path), []byte(serviceAccountToken), PodVolPerms)
 					if err != nil {
 						return nil, fmt.Errorf("error writing service account token: %w", err)
 					}
 				}
 				if source.ConfigMap != nil {
 					data, ok := configMapData(configMaps[source.ConfigMap.Name])
-					if err := writeKeys(newMount.HostPath, "config map", source.ConfigMap.Name, data, ok, source.ConfigMap.Items, projectedDefaultMode(podVolSpec.Projected), source.ConfigMap.Optional); err != nil {
+					if err := writeKeys(podVolRoot, mountSpec.Name, "config map", source.ConfigMap.Name, data, ok, source.ConfigMap.Items, projectedDefaultMode(podVolSpec.Projected), source.ConfigMap.Optional); err != nil {
 						return nil, err
 					}
 				}
 				if source.Secret != nil {
 					data, ok := secretData(secrets[source.Secret.Name])
-					if err := writeKeys(newMount.HostPath, "secret", source.Secret.Name, data, ok, source.Secret.Items, projectedDefaultMode(podVolSpec.Projected), source.Secret.Optional); err != nil {
+					if err := writeKeys(podVolRoot, mountSpec.Name, "secret", source.Secret.Name, data, ok, source.Secret.Items, projectedDefaultMode(podVolSpec.Projected), source.Secret.Optional); err != nil {
 						return nil, err
 					}
 				}
@@ -97,7 +107,7 @@ func CreateContainerMounts(ctx context.Context, podVolRoot string, container cor
 							if item.Mode != nil {
 								mode = os.FileMode(*item.Mode)
 							}
-							err := os.WriteFile(filepath.Join(newMount.HostPath, item.Path), []byte(pod.Namespace), mode)
+							err := writeFileUnder(podVolRoot, filepath.Join(mountSpec.Name, item.Path), []byte(pod.Namespace), mode)
 							if err != nil {
 								return nil, fmt.Errorf("error writing downward API: %w", err)
 							}
@@ -130,11 +140,21 @@ func findPodVolumeSpec(pod *corev1.Pod, name string) *corev1.VolumeSource {
 // parent directory remain.
 const emptyDirPerms os.FileMode = 0777
 
-func makeEmptyDir(path string) error {
-	if err := os.MkdirAll(path, emptyDirPerms); err != nil {
+func makeEmptyDir(root, name string) error {
+	fd, err := mkdirAllUnder(root, name, emptyDirPerms)
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, emptyDirPerms)
+	defer unix.Close(fd)
+	return unix.Fchmod(fd, uint32(emptyDirPerms))
+}
+
+func makeVolumeDir(root, name string) error {
+	fd, err := mkdirAllUnder(root, name, PodVolPerms)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
 }
 
 // projectedDefaultMode keeps the historic 0755 default for projected volumes.
@@ -147,14 +167,14 @@ func projectedDefaultMode(p *corev1.ProjectedVolumeSource) os.FileMode {
 
 const objectVolumeDefaultMode os.FileMode = 0644 // Kubernetes default for configMap and secret volumes
 
-func writeObjectVolume(dir string, v *corev1.VolumeSource, configMaps map[string]*corev1.ConfigMap, secrets map[string]*corev1.Secret) error {
+func writeObjectVolume(root, dir string, v *corev1.VolumeSource, configMaps map[string]*corev1.ConfigMap, secrets map[string]*corev1.Secret) error {
 	if cm := v.ConfigMap; cm != nil {
 		data, ok := configMapData(configMaps[cm.Name])
-		return writeKeys(dir, "config map", cm.Name, data, ok, cm.Items, modeOr(cm.DefaultMode), cm.Optional)
+		return writeKeys(root, dir, "config map", cm.Name, data, ok, cm.Items, modeOr(cm.DefaultMode), cm.Optional)
 	}
 	s := v.Secret
 	data, ok := secretData(secrets[s.SecretName])
-	return writeKeys(dir, "secret", s.SecretName, data, ok, s.Items, modeOr(s.DefaultMode), s.Optional)
+	return writeKeys(root, dir, "secret", s.SecretName, data, ok, s.Items, modeOr(s.DefaultMode), s.Optional)
 }
 
 func modeOr(m *int32) os.FileMode {
@@ -194,7 +214,7 @@ func secretData(s *corev1.Secret) (map[string][]byte, bool) {
 
 // writeKeys writes the selected keys (all keys when items is empty) below dir. A missing object
 // or key is an error unless optional is set, in which case it is skipped like the kubelet does.
-func writeKeys(dir, kind, name string, data map[string][]byte, found bool, items []corev1.KeyToPath, defaultMode os.FileMode, optional *bool) error {
+func writeKeys(root, dir, kind, name string, data map[string][]byte, found bool, items []corev1.KeyToPath, defaultMode os.FileMode, optional *bool) error {
 	opt := optional != nil && *optional
 	if !found {
 		if opt {
@@ -223,11 +243,7 @@ func writeKeys(dir, kind, name string, data map[string][]byte, found bool, items
 		if it.Mode != nil {
 			mode = os.FileMode(*it.Mode)
 		}
-		target := filepath.Join(dir, it.Path)
-		if err := os.MkdirAll(filepath.Dir(target), PodVolPerms); err != nil {
-			return fmt.Errorf("error writing %s: %w", kind, err)
-		}
-		if err := os.WriteFile(target, v, mode); err != nil {
+		if err := writeFileUnder(root, filepath.Join(dir, it.Path), v, mode); err != nil {
 			return fmt.Errorf("error writing %s: %w", kind, err)
 		}
 	}
