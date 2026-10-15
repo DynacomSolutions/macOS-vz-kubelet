@@ -278,3 +278,44 @@ func TestCreateVirtualizationGroup_RejectsImageOutsideAllowedPrefixes(t *testing
 	defer fake.mu.Unlock()
 	assert.Empty(t, fake.createdWith)
 }
+
+func TestCreateVirtualizationGroup_RejectsInvalidDataDisks(t *testing.T) {
+	t.Setenv("VZ_ALLOWED_IMAGE_PREFIXES", "registry.example.com/macos-vz/")
+	ctx := context.Background()
+	er := eventmocks.NewEventRecorder(t) // no events expected: nothing may be pulled
+	fake := &fakeContainersClient{}
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
+	c.ContainerClient = fake
+	creds := resource.NewRegistryCredentialStore(nil)
+
+	const img = "registry.example.com/macos-vz/base:1"
+	for name, tc := range map[string]struct {
+		disks     string
+		linuxOnly bool
+		want      string
+	}{
+		"foreign prefix":        {disks: "registry.example.com/other/xcode:1", want: "VZ_ALLOWED_IMAGE_PREFIXES"},
+		"lookalike host":        {disks: "registry.example.com.evil.io/macos-vz/xcode:1", want: "VZ_ALLOWED_IMAGE_PREFIXES"},
+		"unparseable":           {disks: "xcode", want: "invalid data disk reference"},
+		"empty entry":           {disks: "registry.example.com/macos-vz/a:1,,registry.example.com/macos-vz/b:1", want: "empty entry"},
+		"duplicate":             {disks: "registry.example.com/macos-vz/a:1,registry.example.com/macos-vz/a:1", want: "twice"},
+		"too many":              {disks: strings.TrimSuffix(strings.Repeat("registry.example.com/macos-vz/a:1,", 5), ","), want: "maximum is 4"},
+		"linux-only plus disks": {disks: "registry.example.com/macos-vz/a:1", linuxOnly: true, want: "linux-only"},
+	} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", UID: "uid-1", Annotations: map[string]string{resource.DataDisksAnnotation: tc.disks}},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "macos", Image: img, Resources: validMacOSResources()},
+			}},
+		}
+		if tc.linuxOnly {
+			pod.Annotations[resource.LinuxOnlyAnnotation] = "true"
+		}
+		err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
+		assert.True(t, errdefs.IsInvalidInput(err), "%s: want InvalidInput, got %v", name, err)
+		assert.ErrorContains(t, err, tc.want, name)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.createdWith)
+}

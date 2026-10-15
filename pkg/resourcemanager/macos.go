@@ -22,6 +22,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/log"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -50,6 +51,14 @@ type VirtualMachineParams struct {
 	StopOnPostStart  bool
 	IgnoreImageCache bool
 	RegistryCreds    resource.RegistryCredentials
+	// DataDisks are attached read-only after the boot disk, in order (see resource.DataDisksAnnotation).
+	DataDisks []DataDisk
+}
+
+// DataDisk is a data disk image to pull and attach.
+type DataDisk struct {
+	Ref           string
+	RegistryCreds resource.RegistryCredentials
 }
 
 // MacOSClient manages the lifecycle of macOS virtual machines.
@@ -82,6 +91,7 @@ func NewMacOSClient(ctx context.Context, eventRecorder event.EventRecorder, netw
 	c.downloadManager.SetInUse(func() (refs []string) {
 		for _, info := range c.vms.All() {
 			refs = append(refs, info.Ref)
+			refs = append(refs, info.DataDiskRefs...)
 		}
 		return refs
 	})
@@ -97,8 +107,9 @@ func (c *MacOSClient) CreateVirtualMachine(ctx context.Context, params VirtualMa
 	}()
 
 	_, loaded := c.vms.LoadOrStore(params.Namespace, params.Name, vmdata.VirtualMachineInfo{
-		Ref:      params.Image,
-		Resource: resource.NewMacOSVirtualMachine(params.Env),
+		Ref:          params.Image,
+		DataDiskRefs: dataDiskRefs(params.DataDisks),
+		Resource:     resource.NewMacOSVirtualMachine(params.Env),
 		// Persistent SSH connection shared across every exec for this VM; dials
 		// lazily on first NewSession. Closed in DeleteVirtualMachine.
 		SSHConn: sshconn.New(c.sshDialFunc(params.Namespace, params.Name)),
@@ -108,6 +119,9 @@ func (c *MacOSClient) CreateVirtualMachine(ctx context.Context, params VirtualMa
 	}
 
 	c.eventRecorder.PullingImage(ctx, params.Image, params.ContainerName)
+	for _, d := range params.DataDisks {
+		c.eventRecorder.PullingImage(ctx, d.Ref, params.ContainerName)
+	}
 
 	// Start the asynchronous creation of the virtual machine
 	go c.handleVirtualMachineCreation(ctx, params)
@@ -138,18 +152,30 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 		return
 	}
 
-	cfg, duration, err := c.downloadManager.Download(downloadCtx, params.Image, params.IgnoreImageCache, params.RegistryCreds)
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			// Only log the error if it's not due to context cancellation
-			// to avoid spamming the cluster events with canceled downloads.
-			c.eventRecorder.BackOffPullImage(ctx, params.Image, params.ContainerName, err)
-		}
+	// The image and the data disks download in parallel; the first failure cancels the rest.
+	var cfg config.MacPlatformConfigurationOptions
+	disks := make([]config.Disk, len(params.DataDisks))
+	g, gctx := errgroup.WithContext(downloadCtx)
+	g.Go(func() error {
+		var duration time.Duration
+		var err error
+		cfg, duration, err = c.downloadManager.Download(gctx, params.Image, params.IgnoreImageCache, params.RegistryCreds)
+		c.reportPull(ctx, params.Image, params.ContainerName, duration, err)
+		return err
+	})
+	for i, d := range params.DataDisks {
+		g.Go(func() error {
+			diskCfg, duration, err := c.downloadManager.Download(gctx, d.Ref, false, d.RegistryCreds)
+			c.reportPull(ctx, d.Ref, params.ContainerName, duration, err)
+			// The cached file is shared by every VM that uses it, so it is attached read-only.
+			disks[i] = config.Disk{Path: diskCfg.BlockStoragePath, ReadOnly: true}
+			return err
+		})
+	}
+	if err = g.Wait(); err != nil {
 		return
 	}
 
-	// Log the successful image pull event
-	c.eventRecorder.PulledImage(ctx, params.Image, params.ContainerName, duration.String())
 	logger.Debug(cfg)
 
 	// A disk-only image is a data disk, not something to boot.
@@ -168,7 +194,7 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 	defer guard.Release(ctx)
 
 	// Create the virtual machine instance
-	vm, err := c.createVirtualMachineInstance(ctx, cfg, params)
+	vm, err := c.createVirtualMachineInstance(ctx, cfg, disks, params)
 	if err != nil {
 		return
 	}
@@ -225,6 +251,25 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 		i.Resource.SetPostStartFinishedAt(time.Now())
 		return i
 	})
+}
+
+// reportPull emits the pull outcome event for ref. A cancelled download is not reported, to
+// avoid spamming the cluster events.
+func (c *MacOSClient) reportPull(ctx context.Context, ref, containerName string, duration time.Duration, err error) {
+	switch {
+	case err == nil:
+		c.eventRecorder.PulledImage(ctx, ref, containerName, duration.String())
+	case !errors.Is(err, context.Canceled):
+		c.eventRecorder.BackOffPullImage(ctx, ref, containerName, err)
+	}
+}
+
+// dataDiskRefs lists the references of disks.
+func dataDiskRefs(disks []DataDisk) (refs []string) {
+	for _, d := range disks {
+		refs = append(refs, d.Ref)
+	}
+	return refs
 }
 
 // stopAfterPostStart records the hook's exit status and stops the VM from the host, then
@@ -288,8 +333,8 @@ func (c *MacOSClient) finalizeVirtualMachineInfo(ctx context.Context, params Vir
 }
 
 // createVirtualMachineInstance creates a new virtual machine instance with the specified parameters.
-func (c *MacOSClient) createVirtualMachineInstance(ctx context.Context, cfg config.MacPlatformConfigurationOptions, params VirtualMachineParams) (*vm.VirtualMachineInstance, error) {
-	vm, err := setupVM(ctx, cfg, params.UID, params.CPU, params.MemorySize, c.networkInterfaceIdentifier, params.Mounts)
+func (c *MacOSClient) createVirtualMachineInstance(ctx context.Context, cfg config.MacPlatformConfigurationOptions, disks []config.Disk, params VirtualMachineParams) (*vm.VirtualMachineInstance, error) {
+	vm, err := setupVM(ctx, cfg, params.UID, params.CPU, params.MemorySize, c.networkInterfaceIdentifier, params.Mounts, disks)
 	if err != nil {
 		c.eventRecorder.FailedToCreateContainer(ctx, params.ContainerName, err)
 		return nil, err
@@ -410,14 +455,14 @@ func (c *MacOSClient) getVirtualMachineInfo(ctx context.Context, namespace, name
 }
 
 // setupVM creates a new virtual machine instance with the given parameters.
-func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, uid string, cpu uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount) (*vm.VirtualMachineInstance, error) {
+func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, uid string, cpu uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []config.Disk) (*vm.VirtualMachineInstance, error) {
 	log.G(ctx).Debugf("Creating virtual machine with CPU: %d, memory: %d, network interface: %s, mounts: %+v", cpu, memorySize, networkInterfaceIdentifier, mounts)
 	platformConfig, err := config.NewPlatformConfiguration(ctx, cfg, true, uid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
 
-	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, nil)
+	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, disks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}

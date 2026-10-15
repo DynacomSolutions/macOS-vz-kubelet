@@ -10,6 +10,7 @@ import (
 // VirtualMachineInfo stores the information about macOS virtual machine
 type VirtualMachineInfo struct {
 	Ref                string
+	DataDiskRefs       []string // data disk images attached read-only; kept in the cache while in use
 	Resource           resource.MacOSVirtualMachine
 	DownloadCancelFunc context.CancelFunc
 	PermitAcquired     bool

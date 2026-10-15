@@ -300,3 +300,16 @@ func TestPlatformOptions(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+func TestInUseDirsIncludesDataDiskRefs(t *testing.T) {
+	m := NewManager(event.LogEventRecorder{}, "/cache")
+	// The provider's in-use source lists a VM's image followed by its data disks.
+	m.SetInUse(func() []string {
+		return []string{"r.io/macos-vz/base:1", "r.io/macos-vz/xcode:16", "r.io/macos-vz/tools:3"}
+	})
+	assert.ElementsMatch(t, []string{
+		"/cache/blobs/r.io/macos-vz/base/1",
+		"/cache/blobs/r.io/macos-vz/xcode/16",
+		"/cache/blobs/r.io/macos-vz/tools/3",
+	}, m.inUseDirs())
+}

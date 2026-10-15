@@ -173,6 +173,24 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		return errdefs.InvalidInputf("invalid image reference %q: %v", macOSContainer.Image, err)
 	}
 
+	// Data disks are macOS VM images that are attached read-only: validate them like the image.
+	dataDisks, err := resource.DataDisks(pod)
+	if err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+	if len(dataDisks) > 0 && linuxOnly {
+		return errdefs.InvalidInputf("annotation %s cannot be used on a pod with %s", resource.DataDisksAnnotation, resource.LinuxOnlyAnnotation)
+	}
+	prefixes, _ := envcfg.AllowedImagePrefixes() // validated at startup
+	for _, ref := range dataDisks {
+		if err = downloader.ValidateImageReference(ref); err != nil {
+			return errdefs.InvalidInputf("invalid data disk reference %q: %v", ref, err)
+		}
+		if !envcfg.ImageAllowed(prefixes, ref) {
+			return errdefs.InvalidInputf("data disk %q is not allowed on this node: it must start with one of %v (VZ_ALLOWED_IMAGE_PREFIXES)", ref, prefixes)
+		}
+	}
+
 	// Due to the nature of virtual kubelet CreatePod context,
 	// we need to handle the context cancellation on demand ourselves
 	ctx, extras.cancelFunc = context.WithCancel(ctx)
@@ -203,6 +221,12 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			}
 		}
 
+		disks := make([]rm.DataDisk, len(dataDisks))
+		for i, ref := range dataDisks {
+			disks[i].Ref = ref
+			disks[i].RegistryCreds, _ = creds.ForImage(ref)
+		}
+
 		return c.MacOSClient.CreateVirtualMachine(ctx, rm.VirtualMachineParams{
 			UID:              string(pod.UID),
 			Image:            image,
@@ -217,6 +241,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			StopOnPostStart:  resource.StopsWhenPostStartExits(pod),
 			IgnoreImageCache: pullPolicy == corev1.PullAlways,
 			RegistryCreds:    vmCreds,
+			DataDisks:        disks,
 		})
 	})
 
