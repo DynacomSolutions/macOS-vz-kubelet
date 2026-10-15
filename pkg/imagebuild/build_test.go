@@ -84,10 +84,32 @@ func TestCloneInputsRefusesSymlinkedDisk(t *testing.T) {
 	assert.ErrorContains(t, cloneInputs(imageDir, bd, uint32(os.Getuid())), "not a regular file")
 }
 
+func TestCountMacOSGuests(t *testing.T) {
+	const vz = "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
+	ps := "  100     0 /sbin/launchd\n" +
+		"27174   501 " + vz + "\n" + // Colima's Linux VM under macnode: not counted
+		" 4001     0 " + vz + "\n" + // the provider's macOS VM
+		" 4002     0 " + vz + "\n" +
+		" 5000   502 " + vz + "\n" + // another user's VM
+		"  junk " + vz + "\n" + // unparseable VM line: counted
+		"  200     0 /usr/bin/something-else\n"
+	root := map[int]bool{0: true}
+	assert.Equal(t, 3, countMacOSGuests(ps, root), "root VMs plus the unparseable line")
+	assert.Equal(t, 4, countMacOSGuests(ps, map[int]bool{0: true, 502: true}), "an extra user's VMs count when named")
+	assert.Equal(t, 0, countMacOSGuests("27174 501 "+vz, map[int]bool{}), "a uid outside the set does not count")
+	assert.Equal(t, 0, countMacOSGuests("", root))
+	assert.Equal(t, 0, countMacOSGuests(" 27174   501 "+vz+"\n", root), "Colima alone does not block a build")
+}
+
+func TestCountVirtualizationProcessesRejectsUnknownUser(t *testing.T) {
+	_, err := countVirtualizationProcesses([]string{"no-such-user-xyz"})
+	assert.Error(t, err)
+}
+
 func TestRunRefusals(t *testing.T) {
 	oldCount := countVMProcesses
 	defer func() { countVMProcesses = oldCount }()
-	countVMProcesses = func() (int, error) { return 0, nil }
+	countVMProcesses = func([]string) (int, error) { return 0, nil }
 
 	t.Run("disallowed destination", func(t *testing.T) {
 		o := testOptions(t)
@@ -97,9 +119,9 @@ func TestRunRefusals(t *testing.T) {
 
 	t.Run("a running VM", func(t *testing.T) {
 		o := testOptions(t)
-		countVMProcesses = func() (int, error) { return 1, nil }
-		defer func() { countVMProcesses = func() (int, error) { return 0, nil } }()
-		assert.ErrorContains(t, Run(context.Background(), o), "virtual machine(s) are running")
+		countVMProcesses = func([]string) (int, error) { return 1, nil }
+		defer func() { countVMProcesses = func([]string) (int, error) { return 0, nil } }()
+		assert.ErrorContains(t, Run(context.Background(), o), "macOS virtual machine(s) are running")
 		assert.NoDirExists(t, filepath.Join(o.CacheDir, "build"))
 	})
 

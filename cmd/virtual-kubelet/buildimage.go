@@ -25,7 +25,8 @@ Builds a new macOS image from one already in the provider cache: boots an APFS c
 runs the script in the guest as the VZ_SSH_USER user, stops the VM from the host and streams
 the result to the registry. Must run as root. Needs VZ_ALLOWED_IMAGE_PREFIXES, VZ_SSH_USER and
 VZ_SSH_PRIVATE_KEY_PATH (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE.
-Refuses to run while any virtual machine is running on the host.
+Refuses to run while a macOS virtual machine owned by root (the provider's) or by a --count-vm-user
+user is running; Linux VMs such as Colima's do not count against Apple's 2-VM cap.
 `
 
 // buildImageMain runs the build-image subcommand and returns the process exit code.
@@ -43,6 +44,8 @@ func buildImageMain(args []string) int {
 		timeout   = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
 		logLevel  = fs.String("log-level", "info", "log level")
 	)
+	var countUsers stringList
+	fs.Var(&countUsers, "count-vm-user", "also count this user's Virtualization VMs as running macOS guests (repeatable), for example a user running tart")
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, buildImageUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
@@ -98,6 +101,7 @@ func buildImageMain(args []string) int {
 		MemoryBytes:      *memoryGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		ScriptTimeout:    *timeout,
+		CountVMUsers:     countUsers,
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -109,3 +113,9 @@ func buildImageMain(args []string) int {
 	}
 	return 0
 }
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string     { return fmt.Sprint([]string(*l)) }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }

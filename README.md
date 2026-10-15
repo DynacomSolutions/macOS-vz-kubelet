@@ -185,7 +185,7 @@ MacOSVK build-image --from <registry/ns/name:tag> --to <registry/ns/name:tag> \
 - `--from` and `--to` must both start with an entry of `VZ_ALLOWED_IMAGE_PREFIXES` (required for this command), and `--from` must be fully cached and digest-verified.
 - The disk and aux images are APFS-cloned into `<cache>/build/` (same volume), booted headless, the script runs in the guest as `VZ_SSH_USER` over the existing key, then the VM is stopped from the host (a guest shutdown leaks a VM slot on macOS 26.5).
 - The result is streamed to the registry as gzip layers with no temp file: each layer is read twice (digest first, then upload). `creds.json` is `{"username":"..","password":".."}` or `{"identityToken":".."}`, owned by root, mode 0600. The script must be root-owned and not group/other writable.
-- It refuses to run while any virtual machine is running on the host, honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
+- It refuses to run while a macOS virtual machine owned by root (the provider's) is running, or one owned by a user named with `--count-vm-user` (repeatable); Linux VMs such as Colima's are not counted, and a failure to enumerate refuses the run. It honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
 
 ## Feature overview
 

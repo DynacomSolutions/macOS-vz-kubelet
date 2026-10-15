@@ -15,7 +15,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,13 +60,17 @@ type Options struct {
 	MemoryBytes      uint64
 	NetworkInterface string
 	ScriptTimeout    time.Duration
+	// CountVMUsers are extra users whose Virtualization VMs count as running macOS guests (for
+	// example a user running tart). Root-owned VMs always count.
+	CountVMUsers []string
 }
 
 // Seams replaced in tests.
 var (
 	// cloneFile makes a copy-on-write copy; src is not followed if it is a symlink.
 	cloneFile = func(src, dst string) error { return unix.Clonefile(src, dst, unix.CLONE_NOFOLLOW) }
-	// countVMProcesses counts the running Virtualization.framework VM processes on the host.
+	// countVMProcesses counts the running macOS guests that take one of the 2 VM slots (see
+	// countMacOSGuests); extraUsers are additional users whose VMs count.
 	countVMProcesses = countVirtualizationProcesses
 )
 
@@ -96,13 +102,14 @@ func Run(ctx context.Context, o Options) (err error) {
 	sum := sha256.Sum256(script)
 	scriptSHA := hex.EncodeToString(sum[:])
 
-	// Concurrency with the provider: Virtualization.framework allows 2 VMs on the whole host and
-	// the provider has no endpoint to reserve a slot from another process. The simplest safe rule
-	// is to require that no VM is running at all, so both slots are free for this build.
-	if n, err := countVMProcesses(); err != nil {
+	// Concurrency with the provider: Virtualization.framework allows 2 macOS VMs on the whole host
+	// and the provider has no endpoint to reserve a slot from another process. The simplest safe
+	// rule is to require that no macOS guest is running, so both slots are free for this build.
+	// Linux VMs (Colima) do not count against the cap.
+	if n, err := countVMProcesses(o.CountVMUsers); err != nil {
 		return fmt.Errorf("could not count running virtual machines: %w", err)
 	} else if n > 0 {
-		return fmt.Errorf("%d virtual machine(s) are running on this host; stop or cordon them first (the host allows 2 and the build needs one)", n)
+		return fmt.Errorf("%d macOS virtual machine(s) are running on this host; stop or cordon them first (the host allows 2 and the build needs one)", n)
 	}
 
 	free, err := downloader.FreeBytes(o.CacheDir)
@@ -332,16 +339,51 @@ func runRemote(ctx context.Context, client *ssh.Client, cmd string, stdin io.Rea
 	return err
 }
 
-// countVirtualizationProcesses counts Virtualization.framework VM processes host-wide. The
-// 2-VM limit is system-wide, so this includes VMs of any provider or tool.
-func countVirtualizationProcesses() (int, error) {
-	out, err := exec.Command("/usr/bin/pgrep", "-f", "com.apple.Virtualization.VirtualMachine").Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			return 0, nil // no match
+// vmProcessMarker is in the command line of every Virtualization.framework VM process.
+const vmProcessMarker = "com.apple.Virtualization.VirtualMachine"
+
+// countVirtualizationProcesses lists processes with ps and counts the macOS guests among them.
+// Any failure to enumerate is an error, so the caller fails closed.
+func countVirtualizationProcesses(extraUsers []string) (int, error) {
+	uids := map[int]bool{0: true}
+	for _, name := range extraUsers {
+		u, err := user.Lookup(name)
+		if err != nil {
+			return 0, fmt.Errorf("--count-vm-user %q: %w", name, err)
 		}
-		return 0, err
+		uid, err := strconv.Atoi(u.Uid)
+		if err != nil {
+			return 0, err
+		}
+		uids[uid] = true
 	}
-	return len(strings.Fields(string(out))), nil
+	out, err := exec.Command("/bin/ps", "-axo", "pid=,uid=,command=").Output()
+	if err != nil {
+		return 0, fmt.Errorf("ps: %w", err)
+	}
+	return countMacOSGuests(string(out), uids), nil
+}
+
+// countMacOSGuests counts Virtualization VM processes in ps output ("pid uid command" lines)
+// owned by one of uids. Apple's 2-VM cap applies to macOS guests only, and a process does not
+// say what it runs, so ownership is the signal: the provider runs as root and starts every
+// macOS VM of this node, while Colima's Linux VM belongs to its own user and is not counted.
+// A VM process whose line cannot be parsed is counted (fail closed).
+func countMacOSGuests(ps string, uids map[int]bool) int {
+	n := 0
+	for _, line := range strings.Split(ps, "\n") {
+		if !strings.Contains(line, vmProcessMarker) {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			n++
+			continue
+		}
+		uid, err := strconv.Atoi(f[1])
+		if err != nil || uids[uid] {
+			n++
+		}
+	}
+	return n
 }
