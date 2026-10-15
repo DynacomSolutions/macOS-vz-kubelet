@@ -67,6 +67,7 @@ func TestRunCreateBaseRefusesWithRunningVM(t *testing.T) {
 }
 
 func TestRunCreateBaseRefusesPasswordAuth(t *testing.T) {
+	t.Setenv("VZ_SSH_USER", "admin")
 	t.Setenv("VZ_SSH_PASSWORD", "x")
 	err := RunCreateBase(t.Context(), goodBaseOptions())
 	require.Error(t, err)
