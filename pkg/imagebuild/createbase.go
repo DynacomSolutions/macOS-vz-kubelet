@@ -15,9 +15,10 @@ package imagebuild
 //     /var/db/dslocal, /var/db/.AppleSetupDone (skips Setup Assistant), launchd's disabled.plist
 //     (turns sshd on) and ~admin/.ssh/authorized_keys. See buildutil.SeedDataVolume.
 //
-// Whatever needs the password (passwordless sudo, key-only sshd, admin group) is done in the guest
-// over SSH on first boot, with sudo and the password on stdin, so the blind host-side edits stay
-// minimal. FileVault is off by default and is verified.
+// The same seed also adds the user to the admin group (sudo needs it), writes the passwordless
+// sudoers.d entry and a key-only sshd drop-in, so sshd is key-only from the first boot and the
+// password never crosses SSH. The first boot only verifies the result; FileVault is off by default
+// and is verified too.
 //
 // Untested on real hardware: the host mount of the guest volumes and the first boot of the seeded
 // guest. Both fail closed with an error.
@@ -35,7 +36,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -60,6 +60,8 @@ const (
 	baseExpectedGrowth = 60 << 30
 	// firstBootSSHBudget covers the first boot of a freshly installed macOS, which is slow.
 	firstBootSSHBudget = 15 * time.Minute
+	// firstBootIPBudget bounds the wait for the guest's DHCP lease on that first boot.
+	firstBootIPBudget = 10 * time.Minute
 )
 
 // BaseOptions are the validated inputs of one create-base run.
@@ -96,6 +98,10 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	}
 	if os.Getenv("VZ_SSH_USER") != guestUser {
 		return fmt.Errorf("VZ_SSH_USER must be %q: create-base seeds that user", guestUser)
+	}
+	// Our client must offer the key only: no password or keyboard-interactive login, ever.
+	if os.Getenv("VZ_SSH_PASSWORD") != "" {
+		return errors.New("VZ_SSH_PASSWORD must not be set for create-base: the guest accepts keys only")
 	}
 	authorizedKey, err := resourcemanager.SSHAuthorizedKey()
 	if err != nil {
@@ -220,7 +226,7 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return fmt.Errorf("failed to prepare the installed guest: %w", err)
 	}
 
-	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface}, platformOpts)
+	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts)
 	if err != nil {
 		return err
 	}
@@ -231,7 +237,7 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		}
 	}()
 
-	if err := hardenGuest(ctx, instance.IPAddress, creds.GuestPassword); err != nil {
+	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
 		return err
 	}
 	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout); err != nil {
@@ -332,7 +338,7 @@ func installMacOS(ctx context.Context, o BaseOptions, p config.MacPlatformConfig
 	return nil
 }
 
-var devNode = regexp.MustCompile(`^/dev/disk[0-9]+$`)
+const plistBuddy = "/usr/libexec/PlistBuddy"
 
 // run executes a host tool; only the tail of its output is kept in the error.
 func run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
@@ -356,26 +362,33 @@ func run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte
 // the data volume has no directory node yet, the system volume read-only for its template) and
 // seeds it. Everything is unmounted and detached again on return.
 func seedGuest(ctx context.Context, tmpRoot, diskPath string, spec buildutil.SeedSpec) (err error) {
-	out, err := run(ctx, nil, "/usr/bin/hdiutil", "attach", "-nomount", "-nobrowse", "-noverify",
+	var dev string
+	var cleanup []error // unmount failures; joined after the detach, which runs last
+	// Registered before anything can fail: if the attach output is unusable the device is found
+	// again by image path.
+	defer func() {
+		ctx := context.WithoutCancel(ctx)
+		if dev == "" {
+			if js, jerr := hdiutilJSON(ctx, "info", "-plist"); jerr == nil {
+				real, _ := filepath.EvalSymlinks(diskPath)
+				dev, _ = buildutil.FindImageDevice(js, diskPath, real)
+			}
+		}
+		var derr error
+		if dev != "" {
+			_, derr = run(ctx, nil, "/usr/bin/hdiutil", "detach", "-force", dev)
+		}
+		err = errors.Join(append([]error{err, derr}, cleanup...)...)
+	}()
+	js, err := hdiutilJSON(ctx, "attach", "-plist", "-nomount", "-nobrowse", "-noverify",
 		"-imagekey", "diskimage-class=CRawDiskImage", diskPath)
 	if err != nil {
 		return err
 	}
-	dev := ""
-	for _, line := range strings.Split(string(out), "\n") {
-		if f := strings.Fields(line); len(f) > 0 && devNode.MatchString(f[0]) {
-			dev = f[0]
-			break
-		}
+	if dev, err = buildutil.ParseAttach(js); err != nil {
+		dev = ""
+		return err
 	}
-	if dev == "" {
-		return errors.New("hdiutil attach reported no device")
-	}
-	var cleanup []error // unmount failures; joined after the detach, which runs last
-	defer func() {
-		_, derr := run(context.WithoutCancel(ctx), nil, "/usr/bin/hdiutil", "detach", "-force", dev)
-		err = errors.Join(append([]error{err, derr}, cleanup...)...)
-	}()
 
 	ids, err := guestVolumes(ctx, filepath.Base(dev))
 	if err != nil {
@@ -400,14 +413,15 @@ func seedGuest(ctx context.Context, tmpRoot, diskPath string, spec buildutil.See
 		}, nil
 	}
 
-	dataDir, unmountData, err := mount(ids["Data"], "nobrowse")
+	dataDir, unmountData, err := mount(ids["Data"], "nobrowse,nosuid,nodev")
 	if err != nil {
 		return err
 	}
 	defer unmountData()
 	if sys, ok := ids["System"]; ok {
-		if dir, unmountSys, serr := mount(sys, "nobrowse,rdonly"); serr == nil {
+		if dir, unmountSys, serr := mount(sys, "nobrowse,rdonly,nosuid,nodev"); serr == nil {
 			defer unmountSys()
+			spec.SystemRoot = dir
 			t := filepath.Join(dir, "System/Library/DirectoryServices/DefaultLocalDB/Default")
 			if fi, e := os.Stat(t); e == nil && fi.IsDir() {
 				spec.TemplateDir = t
@@ -420,7 +434,20 @@ func seedGuest(ctx context.Context, tmpRoot, diskPath string, spec buildutil.See
 	hooks := buildutil.SeedHooks{
 		Chown: os.Lchown,
 		EnableService: func(file, label string) error {
-			_, err := run(ctx, nil, "/usr/bin/plutil", "-replace", label, "-bool", "NO", file)
+			// PlistBuddy paths use ':', so the dots in the label are not a key path (plutil -replace reads them as one).
+			if _, err := run(ctx, nil, plistBuddy, "-c", "Set :"+label+" false", file); err != nil {
+				_, err = run(ctx, nil, plistBuddy, "-c", "Add :"+label+" bool false", file)
+				return err
+			}
+			return nil
+		},
+		AppendToArray: func(file, key, value string) error {
+			if _, err := run(ctx, nil, plistBuddy, "-c", "Print :"+key, file); err != nil {
+				if _, err := run(ctx, nil, plistBuddy, "-c", "Add :"+key+" array", file); err != nil {
+					return err
+				}
+			}
+			_, err := run(ctx, nil, plistBuddy, "-c", "Add :"+key+": string "+value, file)
 			return err
 		},
 		BinaryPlist: func(x []byte) ([]byte, error) {
@@ -439,6 +466,15 @@ func seedGuest(ctx context.Context, tmpRoot, diskPath string, spec buildutil.See
 		return errors.New("the guest data volume ignores file ownership on this host")
 	}
 	return nil
+}
+
+// hdiutilJSON runs hdiutil with a -plist verb and returns its output converted to JSON.
+func hdiutilJSON(ctx context.Context, args ...string) ([]byte, error) {
+	out, err := run(ctx, nil, "/usr/bin/hdiutil", args...)
+	if err != nil {
+		return nil, err
+	}
+	return run(ctx, out, "/usr/bin/plutil", "-convert", "json", "-o", "-", "-")
 }
 
 // guestVolumes returns the device identifiers of the Data (and System) volumes of the APFS
@@ -498,10 +534,10 @@ func pickGuestVolumes(js []byte, disk string) (map[string]string, error) {
 	return ids, nil
 }
 
-// hardenGuest waits for the seeded guest's sshd (key login as the seeded user), then, with sudo
-// and the password on stdin (never argv), installs passwordless sudo, key-only sshd and the
-// admin group membership, and checks the result and that FileVault is off.
-func hardenGuest(ctx context.Context, ip, password string) error {
+// verifyGuest waits for the seeded guest's sshd (key login as the seeded user) and checks what
+// the seed set up: passwordless sudo, admin group membership, key-only sshd and FileVault off.
+// No password is sent.
+func verifyGuest(ctx context.Context, ip string) error {
 	sshCfg, err := resourcemanager.SSHClientConfig()
 	if err != nil {
 		return err
@@ -512,28 +548,15 @@ func hardenGuest(ctx context.Context, ip, password string) error {
 	}
 	defer client.Close()
 
-	const setup = `IFS= read -r pw || exit 1
-printf '%s\n' "$pw" | sudo -S -p '' /bin/sh -eu -c '
-umask 022
-mkdir -p /private/etc/sudoers.d /private/etc/ssh/sshd_config.d
-printf "%s\n" "admin ALL=(ALL) NOPASSWD: ALL" > /private/etc/sudoers.d/dynacom-admin.new
-chmod 440 /private/etc/sudoers.d/dynacom-admin.new
-/usr/sbin/visudo -cf /private/etc/sudoers.d/dynacom-admin.new
-mv /private/etc/sudoers.d/dynacom-admin.new /private/etc/sudoers.d/dynacom-admin
-printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n" > /private/etc/ssh/sshd_config.d/000-dynacom.conf
-/usr/sbin/dseditgroup -o edit -a admin -t user admin
-'`
-	if err := runRemote(ctx, client, setup, strings.NewReader(password+"\n"), os.Stderr, 5*time.Minute); err != nil {
-		return fmt.Errorf("failed to configure sudo and sshd in the guest: %w", err)
-	}
 	const verify = `set -eu
 sudo -n true
+/usr/bin/dsmemberutil checkmembership -U admin -G admin | grep -q 'is a member'
 t=$(sudo -n /usr/sbin/sshd -T)
 printf '%s\n' "$t" | grep -qx 'passwordauthentication no'
 printf '%s\n' "$t" | grep -qx 'kbdinteractiveauthentication no'
 /usr/bin/fdesetup status | grep -q 'FileVault is Off'`
 	if err := runRemote(ctx, client, verify, nil, os.Stderr, time.Minute); err != nil {
-		return fmt.Errorf("guest verification failed (passwordless sudo, key-only sshd, FileVault off): %w", err)
+		return fmt.Errorf("guest verification failed (passwordless sudo, admin group, key-only sshd, FileVault off): %w", err)
 	}
 	return nil
 }

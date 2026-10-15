@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync/atomic"
 	"testing"
 
@@ -111,13 +112,23 @@ func TestFetchVerified(t *testing.T) {
 func TestSeedDataVolume(t *testing.T) {
 	root, tmpl := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpl, "users"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpl, "groups"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(tmpl, "users/root.plist"), []byte("root"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpl, "groups/admin.plist"), []byte("group"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "private/etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private/etc/sudoers"), []byte("root ALL=(ALL) ALL\n#includedir /private/etc/sudoers.d\n"), 0o440))
+
 	var chowned []string
+	type app struct{ file, key, value string }
+	var appended []app
+	var enabled []string
 	h := SeedHooks{
 		Chown: func(p string, uid, gid int) error {
 			chowned = append(chowned, fmt.Sprintf("%s %d:%d", filepath.Base(p), uid, gid))
 			return nil
 		},
+		AppendToArray: func(f, k, v string) error { appended = append(appended, app{filepath.Base(f), k, v}); return nil },
+		EnableService: func(f, l string) error { enabled = append(enabled, l); return nil },
 	}
 	s := SeedSpec{User: "admin", Password: "s3cret&<pw>", UID: 501, GID: 20, AuthorizedKey: "ssh-ed25519 AAAA key", TemplateDir: tmpl}
 	require.NoError(t, SeedDataVolume(root, s, h))
@@ -137,11 +148,68 @@ func TestSeedDataVolume(t *testing.T) {
 	assert.Contains(t, chowned, "authorized_keys 501:20")
 	assert.Contains(t, chowned, "admin.plist 0:0")
 
+	// admin group: name in users, the user's GeneratedUID in groupmembers
+	guid := regexp.MustCompile(`<key>generateduid</key><array><string>([0-9A-F-]{36})</string>`).FindStringSubmatch(string(user))
+	require.Len(t, guid, 2)
+	assert.Equal(t, []app{{"admin.plist", "users", "admin"}, {"admin.plist", "groupmembers", guid[1]}}, appended)
+	assert.Empty(t, enabled, "no disabled.plist existed: written directly")
+
+	// sudoers.d and the sshd drop-in: contents and modes
+	for path, want := range map[string]struct {
+		body string
+		mode os.FileMode
+	}{
+		"private/etc/sudoers.d/dynacom-admin":            {"admin ALL=(ALL) NOPASSWD: ALL\n", 0o440},
+		"private/etc/ssh/sshd_config.d/000-dynacom.conf": {"PasswordAuthentication no\nKbdInteractiveAuthentication no\n", 0o644},
+	} {
+		b, err := os.ReadFile(filepath.Join(root, path))
+		require.NoError(t, err, path)
+		assert.Equal(t, want.body, string(b), path)
+		fi, _ := os.Stat(filepath.Join(root, path))
+		assert.Equal(t, want.mode, fi.Mode().Perm(), path)
+	}
+	assert.Contains(t, chowned, "dynacom-admin 0:0")
+	assert.Contains(t, chowned, "000-dynacom.conf 0:0")
+
 	// never overwrite an existing user
 	assert.ErrorContains(t, SeedDataVolume(root, s, h), "already exists")
 	// no local node and no template: refuse
 	s.TemplateDir = ""
 	assert.Error(t, SeedDataVolume(t.TempDir(), s, h))
+}
+
+func TestSeedDataVolumeEditsExistingLaunchdPlist(t *testing.T) {
+	root := t.TempDir()
+	node := filepath.Join(root, "private/var/db/dslocal/nodes/Default")
+	require.NoError(t, os.MkdirAll(filepath.Join(node, "users"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(node, "groups"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(node, "users/root.plist"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(node, "groups/admin.plist"), nil, 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "private/var/db/com.apple.xpc.launchd"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private/var/db/com.apple.xpc.launchd/disabled.plist"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "private/etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private/etc/sudoers"), []byte("@includedir /etc/sudoers.d\n"), 0o440))
+	var enabled []string
+	h := SeedHooks{
+		Chown:         func(string, int, int) error { return nil },
+		AppendToArray: func(string, string, string) error { return nil },
+		EnableService: func(f, l string) error { enabled = append(enabled, filepath.Base(f)+" "+l); return nil },
+	}
+	s := SeedSpec{User: "admin", Password: "pw", UID: 501, GID: 20, AuthorizedKey: "k"}
+	require.NoError(t, SeedDataVolume(root, s, h))
+	assert.Equal(t, []string{"disabled.plist com.openssh.sshd"}, enabled)
+}
+
+func TestSeedRefusesSudoersWithoutInclude(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "private/etc"), 0o755))
+	h := SeedHooks{Chown: func(string, int, int) error { return nil }}
+	s := SeedSpec{User: "admin", Password: "pw", UID: 501, GID: 20, AuthorizedKey: "k", TemplateDir: t.TempDir()}
+	// no sudoers at all
+	assert.ErrorContains(t, SeedDataVolume(root, s, h), "sudoers")
+	// sudoers without the include (a commented line is not an include)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private/etc/sudoers"), []byte("# includedir /private/etc/sudoers.d\nroot ALL=(ALL) ALL\n"), 0o440))
+	assert.ErrorContains(t, SeedDataVolume(root, s, h), "does not include")
 }
 
 func TestCheckBaseArgs(t *testing.T) {
@@ -154,4 +222,22 @@ func TestCheckBaseArgs(t *testing.T) {
 	assert.Error(t, CheckBaseArgs(url, "", to, 80<<30))
 	assert.Error(t, CheckBaseArgs(url, sum, "ghcr.io/x/y:1", 80<<30))
 	assert.Error(t, CheckBaseArgs(url, sum, to, 8<<30), "disk too small")
+}
+
+func TestHdiutilParsing(t *testing.T) {
+	d, err := ParseAttach([]byte(`{"system-entities":[{"dev-entry":"/dev/disk7","content-hint":"GUID_partition_scheme"},{"dev-entry":"/dev/disk7s1"}]}`))
+	require.NoError(t, err)
+	assert.Equal(t, "/dev/disk7", d)
+	_, err = ParseAttach([]byte(`{"system-entities":[{"dev-entry":"/dev/disk7s1"}]}`))
+	assert.Error(t, err)
+	_, err = ParseAttach([]byte(`garbage`))
+	assert.Error(t, err)
+
+	info := []byte(`{"images":[{"image-path":"/a/disk.img","system-entities":[{"dev-entry":"/dev/disk9"},{"dev-entry":"/dev/disk9s1"}]},
+	  {"image-path":"/b/disk.img","system-entities":[{"dev-entry":"/dev/disk3"}]}]}`)
+	d, err = FindImageDevice(info, "/b/disk.img")
+	require.NoError(t, err)
+	assert.Equal(t, "/dev/disk3", d)
+	d, _ = FindImageDevice(info, "/none")
+	assert.Empty(t, d)
 }

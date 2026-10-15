@@ -66,6 +66,13 @@ func TestRunCreateBaseRefusesWithRunningVM(t *testing.T) {
 	assert.NotContains(t, err.Error(), "g\"")
 }
 
+func TestRunCreateBaseRefusesPasswordAuth(t *testing.T) {
+	t.Setenv("VZ_SSH_PASSWORD", "x")
+	err := RunCreateBase(t.Context(), goodBaseOptions())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VZ_SSH_PASSWORD")
+}
+
 func TestPickGuestVolumes(t *testing.T) {
 	js := []byte(`{"Containers":[
 	 {"DesignatedPhysicalStore":"disk0s2","PhysicalStores":[{"DeviceIdentifier":"disk0s2"}],"Volumes":[{"DeviceIdentifier":"disk1s1","Roles":["Data"]}]},
