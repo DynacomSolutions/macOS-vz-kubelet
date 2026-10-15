@@ -152,6 +152,13 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 	c.eventRecorder.PulledImage(ctx, params.Image, params.ContainerName, duration.String())
 	logger.Debug(cfg)
 
+	// A disk-only image is a data disk, not something to boot.
+	if cfg.AuxiliaryStoragePath == "" {
+		err = errdefs.AsInvalidInput(errors.New("image is a data disk, not a bootable VM image"))
+		c.eventRecorder.FailedToCreateContainer(ctx, params.ContainerName, err)
+		return
+	}
+
 	// Wait until resources are available to proceed with the virtual machine creation
 	guard, acquireErr := c.acquirePermit(ctx, types.NamespacedName{Namespace: params.Namespace, Name: params.Name})
 	if acquireErr != nil {

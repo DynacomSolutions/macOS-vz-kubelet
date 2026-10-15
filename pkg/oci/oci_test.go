@@ -443,3 +443,16 @@ func TestParseUncompressedSize(t *testing.T) {
 		assert.Error(t, err, "%q", bad)
 	}
 }
+
+func TestHasMediaType(t *testing.T) {
+	dir := t.TempDir()
+	s, err := oci.New(dir, false, mocks.NewEventRecorder(t))
+	require.NoError(t, err)
+	assert.False(t, s.HasMediaType(oci.MediaTypeDiskImage))
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, oci.MediaTypeDiskImage.Title()), []byte("x"), 0o600))
+	_, err = s.Add(context.Background(), string(oci.MediaTypeDiskImage), "")
+	require.NoError(t, err)
+	assert.True(t, s.HasMediaType(oci.MediaTypeDiskImage))
+	assert.False(t, s.HasMediaType(oci.MediaTypeAuxImage))
+}

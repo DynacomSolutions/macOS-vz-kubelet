@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -249,4 +250,53 @@ func TestPullAuthenticatesWithIdentityToken_Live(t *testing.T) {
 	err = pull(context.Background(), ref, store,
 		resource.RegistryCredentials{IdentityToken: tok})
 	require.NoError(t, err, "token-only pull against a real auth-required registry must succeed once IdentityToken is forwarded")
+}
+
+func TestPlatformOptions(t *testing.T) {
+	const cfgJSON = `{"mediatype":"application/vnd.agoda.macosvz.config.v1+json","os":"darwin","hardwareModelData":"aGFyZHdhcmU=","machineIdData":"bWFjaGluZQ=="}`
+	newStore := func(t *testing.T, files ...oci.MediaType) *oci.Store {
+		t.Helper()
+		dir := t.TempDir()
+		store, err := oci.New(dir, false, event.LogEventRecorder{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = store.Close(context.Background()) })
+		for _, mt := range files {
+			content := "x"
+			if mt == oci.MediaTypeConfigV1 {
+				content = cfgJSON
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(dir, mt.Title()), []byte(content), 0o600))
+			_, err := store.Add(context.Background(), string(mt), "")
+			require.NoError(t, err)
+		}
+		return store
+	}
+	ctx := context.Background()
+
+	t.Run("disk-only image is a data disk", func(t *testing.T) {
+		cfg, err := platformOptions(ctx, newStore(t, oci.MediaTypeDiskImage))
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.BlockStoragePath)
+		assert.Empty(t, cfg.AuxiliaryStoragePath)
+		assert.Empty(t, cfg.HardwareModelData)
+	})
+	t.Run("full image", func(t *testing.T) {
+		cfg, err := platformOptions(ctx, newStore(t, oci.MediaTypeDiskImage, oci.MediaTypeAuxImage, oci.MediaTypeConfigV1))
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.BlockStoragePath)
+		assert.NotEmpty(t, cfg.AuxiliaryStoragePath)
+		assert.Equal(t, "aGFyZHdhcmU=", cfg.HardwareModelData)
+	})
+	t.Run("image missing only the aux layer fails", func(t *testing.T) {
+		_, err := platformOptions(ctx, newStore(t, oci.MediaTypeDiskImage, oci.MediaTypeConfigV1))
+		assert.ErrorContains(t, err, string(oci.MediaTypeAuxImage))
+	})
+	t.Run("image missing only the config layer fails", func(t *testing.T) {
+		_, err := platformOptions(ctx, newStore(t, oci.MediaTypeDiskImage, oci.MediaTypeAuxImage))
+		assert.Error(t, err)
+	})
+	t.Run("no disk layer fails", func(t *testing.T) {
+		_, err := platformOptions(ctx, newStore(t))
+		assert.Error(t, err)
+	})
 }
