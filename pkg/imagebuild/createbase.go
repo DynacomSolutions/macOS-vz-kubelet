@@ -240,7 +240,7 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
 		return err
 	}
-	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout); err != nil {
+	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, 0); err != nil {
 		return err
 	}
 	time.Sleep(stopGrace)
