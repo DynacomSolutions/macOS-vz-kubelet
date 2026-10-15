@@ -31,8 +31,8 @@ type PushOptions struct {
 	Ref         string // destination name:tag
 	Creds       Credentials
 	Disk        string // path of disk.img
-	Aux         string // path of aux.img
-	Config      string // path of config.json (copied byte for byte from the base image)
+	Aux         string // path of aux.img; empty with Config for a data disk (disk layer only)
+	Config      string // path of config.json (copied byte for byte from the base image); empty with Aux
 	Annotations map[string]string
 }
 
@@ -47,6 +47,10 @@ type PushResult struct {
 // needs up front, then compressed again straight into the upload. The disk must not change
 // between the two reads; the registry rejects the layer if it did.
 func Push(ctx context.Context, o PushOptions) (PushResult, error) {
+	if (o.Aux == "") != (o.Config == "") {
+		return PushResult{}, errors.New("aux and config must be set together: both for a bootable image, neither for a data disk")
+	}
+	dataDisk := o.Aux == ""
 	repo, err := remote.NewRepository(o.Ref)
 	if err != nil {
 		return PushResult{}, err
@@ -66,10 +70,15 @@ func Push(ctx context.Context, o PushOptions) (PushResult, error) {
 		path string
 	}
 	var layers []gzLayer
-	for _, l := range []struct {
+	type layerIn struct {
 		mt   oci.MediaType
 		path string
-	}{{oci.MediaTypeDiskImage, o.Disk}, {oci.MediaTypeAuxImage, o.Aux}} {
+	}
+	ins := []layerIn{{oci.MediaTypeDiskImage, o.Disk}}
+	if !dataDisk {
+		ins = append(ins, layerIn{oci.MediaTypeAuxImage, o.Aux})
+	}
+	for _, l := range ins {
 		logger.Infof("Hashing %s (pass 1 of 2, nothing is written)", l.mt.Title())
 		r, err := disk.CompressToWriter(ctx, l.path, io.Discard)
 		if err != nil {
@@ -87,19 +96,24 @@ func Push(ctx context.Context, o PushOptions) (PushResult, error) {
 		}})
 	}
 
-	cfgBytes, err := os.ReadFile(o.Config)
-	if err != nil {
-		return PushResult{}, err
-	}
-	var cfg oci.Config
-	if err := json.Unmarshal(cfgBytes, &cfg); err != nil || cfg.HardwareModelData == "" || cfg.MachineIdData == "" {
-		return PushResult{}, errors.New("config.json has no hardware model or machine identifier")
-	}
-	cfgDesc := ocispec.Descriptor{
-		MediaType:   string(oci.MediaTypeConfigV1),
-		Digest:      digest.FromBytes(cfgBytes),
-		Size:        int64(len(cfgBytes)),
-		Annotations: map[string]string{ocispec.AnnotationTitle: oci.MediaTypeConfigV1.Title()},
+	var cfgBytes []byte
+	var cfgDesc ocispec.Descriptor
+	if !dataDisk {
+		var err error
+		cfgBytes, err = os.ReadFile(o.Config)
+		if err != nil {
+			return PushResult{}, err
+		}
+		var cfg oci.Config
+		if err := json.Unmarshal(cfgBytes, &cfg); err != nil || cfg.HardwareModelData == "" || cfg.MachineIdData == "" {
+			return PushResult{}, errors.New("config.json has no hardware model or machine identifier")
+		}
+		cfgDesc = ocispec.Descriptor{
+			MediaType:   string(oci.MediaTypeConfigV1),
+			Digest:      digest.FromBytes(cfgBytes),
+			Size:        int64(len(cfgBytes)),
+			Annotations: map[string]string{ocispec.AnnotationTitle: oci.MediaTypeConfigV1.Title()},
+		}
 	}
 
 	emptyCfg := ocispec.DescriptorEmptyJSON
@@ -109,12 +123,16 @@ func Push(ctx context.Context, o PushOptions) (PushResult, error) {
 	for k, v := range o.Annotations {
 		annotations[k] = v
 	}
+	manifestLayers := []ocispec.Descriptor{layers[0].desc}
+	if !dataDisk {
+		manifestLayers = append(manifestLayers, layers[1].desc, cfgDesc)
+	}
 	manifest := ocispec.Manifest{
 		Versioned:    specs.Versioned{SchemaVersion: 2},
 		MediaType:    ocispec.MediaTypeImageManifest,
 		ArtifactType: ArtifactType,
 		Config:       emptyCfg,
-		Layers:       []ocispec.Descriptor{layers[0].desc, layers[1].desc, cfgDesc},
+		Layers:       manifestLayers,
 		Annotations:  annotations,
 	}
 	manifestBytes, err := json.Marshal(manifest)
@@ -139,10 +157,15 @@ func Push(ctx context.Context, o PushOptions) (PushResult, error) {
 			return PushResult{}, err
 		}
 	}
-	for _, b := range []struct {
+	type smallBlob struct {
 		d ocispec.Descriptor
 		c []byte
-	}{{cfgDesc, cfgBytes}, {emptyCfg, ocispec.DescriptorEmptyJSON.Data}} {
+	}
+	smallBlobs := []smallBlob{{emptyCfg, ocispec.DescriptorEmptyJSON.Data}}
+	if !dataDisk {
+		smallBlobs = append(smallBlobs, smallBlob{cfgDesc, cfgBytes})
+	}
+	for _, b := range smallBlobs {
 		if ok, err := blobs.Exists(ctx, b.d); err == nil && ok {
 			continue
 		}

@@ -42,6 +42,8 @@ const (
 	maxConfigSize = 1 << 20
 	// stopGrace lets the guest's page cache reach the virtual disk after `sync`.
 	stopGrace = 3 * time.Second
+	// maxDataDiskGiB bounds --data-disk-gib (1 TiB) so a typo cannot overflow the byte size.
+	maxDataDiskGiB = 1024
 )
 
 // Options are the validated inputs of one build.
@@ -55,6 +57,11 @@ type Options struct {
 	MinFreeBytes   uint64   // VZ_MIN_FREE_BYTES floor, 0 disables
 	ExpectedGrowth uint64   // bytes the clone is expected to grow by
 	OwnerUID       uint32   // required owner of the script, credentials and cached files (0 in production)
+
+	// DataDiskGiB, when non-zero, builds a data disk instead of a bootable image: a blank sparse
+	// disk of this size is attached to the build VM as a second writable device, the script
+	// formats and fills it, and only that disk is pushed.
+	DataDiskGiB uint64
 
 	CPU              uint
 	MemoryBytes      uint64
@@ -87,6 +94,10 @@ func Run(ctx context.Context, o Options) (err error) {
 	}
 	if _, err := vm.ValidateMemorySize(o.MemoryBytes); err != nil {
 		return err
+	}
+
+	if o.DataDiskGiB > maxDataDiskGiB {
+		return fmt.Errorf("--data-disk-gib %d is above the maximum of %d", o.DataDiskGiB, maxDataDiskGiB)
 	}
 
 	script, err := buildutil.ReadFile(o.ScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
@@ -161,12 +172,22 @@ func Run(ctx context.Context, o Options) (err error) {
 		return fmt.Errorf("base config.json: %w", err)
 	}
 
+	var disks []config.Disk
+	dataPath := ""
+	if o.DataDiskGiB > 0 {
+		dataPath, _ = bd.Path("data.img")
+		if err := createSparseDisk(dataPath, o.DataDiskGiB); err != nil {
+			return err
+		}
+		disks = append(disks, config.Disk{Path: dataPath})
+	}
+
 	instance, err := bootClone(ctx, o, config.MacPlatformConfigurationOptions{
 		BlockStoragePath:      diskPath,
 		AuxiliaryStoragePath:  auxPath,
 		HardwareModelData:     imgCfg.HardwareModelData,
 		MachineIdentifierData: imgCfg.MachineIdData,
-	})
+	}, disks)
 	if err != nil {
 		return err
 	}
@@ -195,7 +216,7 @@ func Run(ctx context.Context, o Options) (err error) {
 			baseDiskDigest = l.Annotations[oci.AnnotationUncompressedDigest]
 		}
 	}
-	res, err := buildutil.Push(ctx, buildutil.PushOptions{
+	push := buildutil.PushOptions{
 		Ref:    o.To,
 		Creds:  creds,
 		Disk:   diskPath,
@@ -208,12 +229,29 @@ func Run(ctx context.Context, o Options) (err error) {
 			"com.agoda.macosvz.build.script-sha256":        scriptSHA,
 			"com.agoda.macosvz.build.machine-identifier":   "shared with the base image",
 		},
-	})
+	}
+	if dataPath != "" {
+		// A data disk is the blank disk the script filled; the boot clone is discarded.
+		push.Disk, push.Aux, push.Config = dataPath, "", ""
+	}
+	res, err := buildutil.Push(ctx, push)
 	if err != nil {
 		return err
 	}
 	logger.Infof("Pushed %s (manifest %s)", o.To, res.ManifestDigest)
 	return nil
+}
+
+// createSparseDisk creates an empty raw disk image of gib GiB that takes no space until written.
+func createSparseDisk(path string, gib uint64) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Truncate(path, int64(gib<<30))
 }
 
 // cloneInputs APFS-clones disk.img and aux.img from the cached image into the build
@@ -246,12 +284,12 @@ func cloneInputs(imageDir string, bd *buildutil.BuildDir, ownerUID uint32) error
 }
 
 // bootClone starts a headless VM from the cloned disk (no overlay: the clone is the disk).
-func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurationOptions) (*vm.VirtualMachineInstance, error) {
+func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurationOptions, disks []config.Disk) (*vm.VirtualMachineInstance, error) {
 	platform, err := config.NewPlatformConfiguration(ctx, cfg, false, "build-image")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, disks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}

@@ -410,7 +410,7 @@ func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, ui
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
 
-	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts)
+	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}
