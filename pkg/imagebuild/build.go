@@ -60,6 +60,8 @@ type Options struct {
 	MemoryBytes      uint64
 	NetworkInterface string
 	ScriptTimeout    time.Duration
+	// IPLookupTimeout overrides the VM's IP lookup timeout when non-zero (create-base's first boot).
+	IPLookupTimeout time.Duration
 	// CountVMUsers are extra users whose Virtualization VMs count as running macOS guests (for
 	// example a user running tart). Root-owned VMs always count.
 	CountVMUsers []string
@@ -257,6 +259,7 @@ func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurati
 	if err != nil {
 		return nil, err
 	}
+	instance.IPLookupTimeout = o.IPLookupTimeout
 	if err := instance.Start(ctx); err != nil {
 		_ = instance.Stop(context.WithoutCancel(ctx))
 		return nil, err

@@ -91,6 +91,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "build-image" {
 		os.Exit(buildImageMain(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "create-base" {
+		os.Exit(createBaseMain(os.Args[2:]))
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()

@@ -24,6 +24,9 @@ const (
 // VirtualMachineInstance represents a virtual machine instance.
 type VirtualMachineInstance struct {
 	IPAddress string
+	// IPLookupTimeout bounds the IP address lookup in Start; zero means IPAddressLookupTimeout.
+	// create-base raises it for the slow first boot of a freshly installed guest.
+	IPLookupTimeout time.Duration
 
 	CreatedAt  time.Time
 	StartedAt  *time.Time
@@ -116,7 +119,11 @@ func (i *VirtualMachineInstance) Start(ctx context.Context, opts ...vz.VirtualMa
 		return err
 	}
 
-	ctx, i.ipRetrievalCancelFunc = context.WithTimeout(ctx, IPAddressLookupTimeout)
+	lookupTimeout := IPAddressLookupTimeout
+	if i.IPLookupTimeout > 0 {
+		lookupTimeout = i.IPLookupTimeout
+	}
+	ctx, i.ipRetrievalCancelFunc = context.WithTimeout(ctx, lookupTimeout)
 	defer i.ipRetrievalCancelFunc()
 	err = i.retrieveIPAddress(ctx)
 	if err != nil {
