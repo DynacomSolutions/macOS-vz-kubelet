@@ -221,12 +221,6 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			}
 		}
 
-		disks := make([]rm.DataDisk, len(dataDisks))
-		for i, ref := range dataDisks {
-			disks[i].Ref = ref
-			disks[i].RegistryCreds, _ = creds.ForImage(ref)
-		}
-
 		return c.MacOSClient.CreateVirtualMachine(ctx, rm.VirtualMachineParams{
 			UID:              string(pod.UID),
 			Image:            image,
@@ -241,7 +235,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			StopOnPostStart:  resource.StopsWhenPostStartExits(pod),
 			IgnoreImageCache: pullPolicy == corev1.PullAlways,
 			RegistryCreds:    vmCreds,
-			DataDisks:        disks,
+			DataDisks:        dataDiskParams(dataDisks, creds),
 		})
 	})
 
@@ -583,4 +577,14 @@ func (c *VzClientAPIs) GetVirtualizationGroupStats(ctx context.Context, namespac
 // getPodVolumeRoot returns the root path for the volumes of a pod
 func (c *VzClientAPIs) getPodVolumeRoot(pod *corev1.Pod) string {
 	return filepath.Join(c.podVolumesDir, string(pod.UID))
+}
+
+// dataDiskParams pairs each data disk reference with its registry credentials, in order.
+func dataDiskParams(refs []string, creds resource.RegistryCredentialStore) []rm.DataDisk {
+	disks := make([]rm.DataDisk, len(refs))
+	for i, ref := range refs {
+		disks[i].Ref = ref
+		disks[i].RegistryCreds, _ = creds.ForImage(ref)
+	}
+	return disks
 }

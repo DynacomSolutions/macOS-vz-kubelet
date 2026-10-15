@@ -29,6 +29,8 @@ Refuses to run while a macOS virtual machine owned by root (the provider's) or b
 user is running; Linux VMs such as Colima's do not count against Apple's 2-VM cap.
 With --data-disk-gib N the result is a data disk, not a bootable image: the script finds the blank
 extra disk and formats it (diskutil eraseDisk), and only that disk is pushed.
+The script must leave the data disk unmountable cleanly (no open files, no processes using it): the
+build unmounts it over SSH before the hard stop and fails if that does not work.
 `
 
 // buildImageMain runs the build-image subcommand and returns the process exit code.
@@ -43,7 +45,7 @@ func buildImageMain(args []string) int {
 		cpu       = fs.Uint("cpu", 4, "virtual CPUs of the build VM")
 		memoryGiB = fs.Uint64("memory-gib", 8, "memory of the build VM in GiB")
 		growthGiB = fs.Uint64("expected-growth-gib", 10, "disk growth of the clone expected from the script, in GiB")
-		dataGiB   = fs.Uint64("data-disk-gib", 0, "build a read-only data disk instead of a bootable image: attach a blank sparse disk of this many GiB to the build VM (the script formats and fills it) and push only that disk; 0 builds a normal image")
+		dataGiB   = fs.Uint64("data-disk-gib", 0, "build a read-only data disk instead of a bootable image: attach a blank sparse disk of this many GiB (at most 256) to the build VM (the script formats and fills it, and leaves it unmountable cleanly) and push only that disk; 0 builds a normal image")
 		timeout   = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
 		logLevel  = fs.String("log-level", "info", "log level")
 	)

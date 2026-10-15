@@ -319,3 +319,40 @@ func TestCreateVirtualizationGroup_RejectsInvalidDataDisks(t *testing.T) {
 	defer fake.mu.Unlock()
 	assert.Empty(t, fake.createdWith)
 }
+
+// A valid annotation reaches the macOS client: it announces every data disk pull, in order,
+// right after the image's.
+func TestCreateVirtualizationGroup_PassesDataDisksToTheMacOSClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var pulling []string
+	er := eventmocks.NewEventRecorder(t)
+	er.EXPECT().PullingImage(mock.Anything, mock.Anything, mock.Anything).
+		Run(func(_ context.Context, image string, _ string) {
+			mu.Lock()
+			defer mu.Unlock()
+			pulling = append(pulling, image)
+		}).Return()
+	// The detached download goroutine fails against the unreachable registry.
+	er.EXPECT().PulledImage(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+	er.EXPECT().BackOffPullImage(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+	er.EXPECT().FailedToPullImage(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "p", Namespace: "default", UID: "uid-1",
+			Annotations: map[string]string{resource.DataDisksAnnotation: "localhost/macos-vz/xcode:16, localhost/macos-vz/tools:3"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "macos", Image: "localhost/macos-vz/base:1", Resources: validMacOSResources()},
+		}},
+	}
+	err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, resource.NewRegistryCredentialStore(nil))
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{"localhost/macos-vz/base:1", "localhost/macos-vz/xcode:16", "localhost/macos-vz/tools:3"}, pulling)
+}

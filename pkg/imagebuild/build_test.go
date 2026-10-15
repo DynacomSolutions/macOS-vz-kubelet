@@ -153,6 +153,16 @@ func TestRunRefusals(t *testing.T) {
 	})
 }
 
+func TestUnmountCommand(t *testing.T) {
+	assert.Equal(t, "/bin/bash -s -- 8589934592", unmountCommand(8<<30))
+	assert.Contains(t, unmountDataDiskScript, `sudo -n diskutil unmountDisk force "/dev/$1"`)
+}
+
+func TestNeededBytesCountsTheDataDisk(t *testing.T) {
+	assert.Equal(t, uint64(10<<30), neededBytes(Options{ExpectedGrowth: 10 << 30}))
+	assert.Equal(t, uint64(10<<30+64<<30), neededBytes(Options{ExpectedGrowth: 10 << 30, DataDiskGiB: 64}))
+}
+
 func TestCreateSparseDisk(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "data.img")
 	require.NoError(t, createSparseDisk(p, 2))
