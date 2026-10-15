@@ -134,6 +134,12 @@ func TestRunRefusals(t *testing.T) {
 		assert.NoDirExists(t, filepath.Join(o.CacheDir, "build"))
 	})
 
+	t.Run("data disk too large", func(t *testing.T) {
+		o := testOptions(t)
+		o.DataDiskGiB = maxDataDiskGiB + 1
+		assert.ErrorContains(t, Run(context.Background(), o), "--data-disk-gib")
+	})
+
 	t.Run("script writable by others", func(t *testing.T) {
 		o := testOptions(t)
 		require.NoError(t, os.Chmod(o.ScriptPath, 0o666))
@@ -145,4 +151,23 @@ func TestRunRefusals(t *testing.T) {
 		require.NoError(t, os.Chmod(o.CredsPath, 0o644))
 		assert.ErrorContains(t, Run(context.Background(), o), "too permissive")
 	})
+}
+
+func TestUnmountCommand(t *testing.T) {
+	assert.Equal(t, "/bin/bash -s -- 8589934592", unmountCommand(8<<30))
+	assert.Contains(t, unmountDataDiskScript, `sudo -n diskutil unmountDisk force "/dev/$1"`)
+}
+
+func TestNeededBytesCountsTheDataDisk(t *testing.T) {
+	assert.Equal(t, uint64(10<<30), neededBytes(Options{ExpectedGrowth: 10 << 30}))
+	assert.Equal(t, uint64(10<<30+64<<30), neededBytes(Options{ExpectedGrowth: 10 << 30, DataDiskGiB: 64}))
+}
+
+func TestCreateSparseDisk(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "data.img")
+	require.NoError(t, createSparseDisk(p, 2))
+	fi, err := os.Stat(p)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2<<30), fi.Size())
+	assert.Error(t, createSparseDisk(p, 2), "an existing file is not reused")
 }

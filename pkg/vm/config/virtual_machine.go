@@ -27,8 +27,14 @@ type VirtualMachineConfiguration struct {
 	*vz.VirtualMachineConfiguration
 }
 
+// Disk is an extra virtio block device attached after the boot disk.
+type Disk struct {
+	Path     string
+	ReadOnly bool
+}
+
 // NewVirtualMachineConfiguration initializes a new virtual machine configuration with provided settings.
-func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount) (p *VirtualMachineConfiguration, err error) {
+func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []Disk) (p *VirtualMachineConfiguration, err error) {
 	ctx, span := trace.StartSpan(ctx, "vm.NewVirtualMachineConfiguration")
 	defer func() {
 		span.SetStatus(err)
@@ -58,7 +64,7 @@ func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *Platfor
 	}
 
 	// Attach device configurations
-	if err = attachDeviceConfigurations(ctx, config, platformConfig, networkInterfaceIdentifier, macAddr); err != nil {
+	if err = attachDeviceConfigurations(ctx, config, platformConfig, networkInterfaceIdentifier, macAddr, disks); err != nil {
 		return nil, fmt.Errorf("failed to attach device configurations: %w", err)
 	}
 
@@ -97,7 +103,7 @@ func (c *VirtualMachineConfiguration) GetOverlays() (overlayBlockStoragePath str
 }
 
 // attachDeviceConfigurations encapsulates various device and configuration attachments to the VM.
-func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineConfiguration, platformConfig *PlatformConfiguration, networkInterfaceIdentifier string, mac net.HardwareAddr) (err error) {
+func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineConfiguration, platformConfig *PlatformConfiguration, networkInterfaceIdentifier string, mac net.HardwareAddr, disks []Disk) (err error) {
 	_, span := trace.StartSpan(ctx, "vm.attachDeviceConfigurations")
 	defer func() {
 		span.SetStatus(err)
@@ -128,7 +134,19 @@ func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineCo
 	if err != nil {
 		return fmt.Errorf("failed to create block device configuration: %w", err)
 	}
-	config.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{blockDeviceConfig})
+	storageDevices := []vz.StorageDeviceConfiguration{blockDeviceConfig}
+	for _, d := range disks {
+		attachment, err := vz.NewDiskImageStorageDeviceAttachment(d.Path, d.ReadOnly)
+		if err != nil {
+			return fmt.Errorf("failed to create disk image storage device attachment for %s: %w", d.Path, err)
+		}
+		dev, err := vz.NewVirtioBlockDeviceConfiguration(attachment)
+		if err != nil {
+			return fmt.Errorf("failed to create block device configuration for %s: %w", d.Path, err)
+		}
+		storageDevices = append(storageDevices, dev)
+	}
+	config.SetStorageDevicesVirtualMachineConfiguration(storageDevices)
 
 	// Create a network device configuration
 	networkDeviceConfig, err := createNetworkDeviceConfiguration(networkInterfaceIdentifier)

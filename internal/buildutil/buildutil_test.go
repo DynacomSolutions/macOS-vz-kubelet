@@ -230,6 +230,40 @@ func TestPushStreamsWithoutTempFiles(t *testing.T) {
 	assert.Empty(t, left)
 }
 
+func TestPushDataDiskHasOnlyTheDiskLayer(t *testing.T) {
+	reg := &fakeRegistry{blobs: map[string][]byte{}, manifests: map[string][]byte{}}
+	srv := httptest.NewServer(reg)
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	diskData := bytes.Repeat([]byte("data-disk"), 100000)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.img"), diskData, 0o600))
+
+	_, err := Push(context.Background(), PushOptions{
+		Ref: host + "/macos-vz/xcode:16", Creds: Credentials{Username: "u", Password: "p"}, Disk: filepath.Join(dir, "data.img"),
+	})
+	require.NoError(t, err)
+
+	var m ocispec.Manifest
+	require.NoError(t, json.Unmarshal(reg.manifests["16"], &m))
+	assert.Equal(t, ArtifactType, m.ArtifactType)
+	require.Len(t, m.Layers, 1)
+	assert.Equal(t, "application/vnd.agoda.macosvz.disk.image.v1", m.Layers[0].MediaType)
+	assert.Equal(t, "disk.img", m.Layers[0].Annotations[ocispec.AnnotationTitle])
+	assert.Equal(t, digest.FromBytes(diskData).String(), m.Layers[0].Annotations["com.agoda.macosvz.content.uncompressed-digest"])
+	assert.Equal(t, fmt.Sprint(len(diskData)), m.Layers[0].Annotations["com.agoda.macosvz.content.uncompressed-size"])
+	assert.Contains(t, reg.blobs, m.Config.Digest.String())
+	assert.Len(t, reg.blobs, 2, "the disk layer and the empty config only")
+}
+
+func TestPushRejectsAuxWithoutConfig(t *testing.T) {
+	_, err := Push(context.Background(), PushOptions{Ref: "127.0.0.1:1/x/y:z", Disk: "d", Aux: "a"})
+	assert.ErrorContains(t, err, "set together")
+	_, err = Push(context.Background(), PushOptions{Ref: "127.0.0.1:1/x/y:z", Disk: "d", Config: "c"})
+	assert.ErrorContains(t, err, "set together")
+}
+
 func TestPushRejectsConfigWithoutHardwareModel(t *testing.T) {
 	dir := t.TempDir()
 	for n, b := range map[string]string{"disk.img": "d", "aux.img": "a", "config.json": `{"os":"darwin"}`} {

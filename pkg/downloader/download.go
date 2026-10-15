@@ -115,9 +115,19 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 	now := time.Now()
 	_ = os.Chtimes(imageDir, now, now)
 
+	return platformOptions(ctx, store)
+}
+
+// platformOptions reads the pulled files from store. A disk-only image (a data disk: no aux
+// layer and no config layer) returns just BlockStoragePath; an image missing only one of the
+// aux and config layers is incomplete and fails.
+func platformOptions(ctx context.Context, store *oci.Store) (cfg config.MacPlatformConfigurationOptions, err error) {
 	blkStoragePath, err := store.GetFilePathForMediaType(ctx, oci.MediaTypeDiskImage)
 	if err != nil {
 		return cfg, fmt.Errorf("failed to get file path for media type %s: %w", oci.MediaTypeDiskImage, err)
+	}
+	if !store.HasMediaType(oci.MediaTypeAuxImage) && !store.HasMediaType(oci.MediaTypeConfigV1) {
+		return config.MacPlatformConfigurationOptions{BlockStoragePath: blkStoragePath}, nil
 	}
 	auxStoragePath, err := store.GetFilePathForMediaType(ctx, oci.MediaTypeAuxImage)
 	if err != nil {

@@ -8,7 +8,7 @@ import (
 )
 
 // fixedNames are the only files a build directory holds; callers never supply a file name.
-var fixedNames = map[string]bool{"disk.img": true, "aux.img": true, "config.json": true}
+var fixedNames = map[string]bool{"disk.img": true, "aux.img": true, "config.json": true, "data.img": true}
 
 // BuildDir is a private working directory under <root>, on the same volume as the image cache
 // so APFS clonefile works. Only one build runs at a time (flock on <root>/.lock); leftovers of

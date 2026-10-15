@@ -59,6 +59,9 @@ func NewManager(eventRecorder event.EventRecorder, cachePath string) *Manager {
 // SetInUse registers the source of image refs that must never be evicted from the cache.
 func (m *Manager) SetInUse(f func() []string) { m.inUse = f }
 
+// InUseDirs returns the cache directories that must not be evicted right now.
+func (m *Manager) InUseDirs() []string { return m.inUseDirs() }
+
 // inUseDirs returns the cache directories of every ref in use or being downloaded.
 func (m *Manager) inUseDirs() (dirs []string) { // called under the guard lock, so current at decision time
 	var refs []string

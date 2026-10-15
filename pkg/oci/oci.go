@@ -435,6 +435,12 @@ func (s *Store) GetFilePathForMediaType(ctx context.Context, mediaType MediaType
 	return path, nil
 }
 
+// HasMediaType reports whether a file of the given media type was pulled or added.
+func (s *Store) HasMediaType(mediaType MediaType) bool {
+	_, ok := s.mediaTypeToPath.Load(string(mediaType))
+	return ok
+}
+
 // GetConfig retrieves the Store's configuration.
 func (s *Store) GetConfig(ctx context.Context) (cfg Config, err error) {
 	ctx, span := trace.StartSpan(ctx, "OCI.GetConfig")

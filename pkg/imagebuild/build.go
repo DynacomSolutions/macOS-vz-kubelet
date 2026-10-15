@@ -42,6 +42,9 @@ const (
 	maxConfigSize = 1 << 20
 	// stopGrace lets the guest's page cache reach the virtual disk after `sync`.
 	stopGrace = 3 * time.Second
+	// maxDataDiskGiB bounds --data-disk-gib: the disk guard reserves a data disk's full logical
+	// size on every node that pulls it, so an oversized disk is costly everywhere.
+	maxDataDiskGiB = 256
 )
 
 // Options are the validated inputs of one build.
@@ -55,6 +58,11 @@ type Options struct {
 	MinFreeBytes   uint64   // VZ_MIN_FREE_BYTES floor, 0 disables
 	ExpectedGrowth uint64   // bytes the clone is expected to grow by
 	OwnerUID       uint32   // required owner of the script, credentials and cached files (0 in production)
+
+	// DataDiskGiB, when non-zero, builds a data disk instead of a bootable image: a blank sparse
+	// disk of this size is attached to the build VM as a second writable device, the script
+	// formats and fills it, and only that disk is pushed.
+	DataDiskGiB uint64
 
 	CPU              uint
 	MemoryBytes      uint64
@@ -89,6 +97,10 @@ func Run(ctx context.Context, o Options) (err error) {
 		return err
 	}
 
+	if o.DataDiskGiB > maxDataDiskGiB {
+		return fmt.Errorf("--data-disk-gib %d is above the maximum of %d", o.DataDiskGiB, maxDataDiskGiB)
+	}
+
 	script, err := buildutil.ReadFile(o.ScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
 	if err != nil {
 		return fmt.Errorf("script: %w", err)
@@ -118,8 +130,9 @@ func Run(ctx context.Context, o Options) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to read free disk space: %w", err)
 	}
-	if !downloader.Fits(free, o.ExpectedGrowth, o.MinFreeBytes) {
-		return fmt.Errorf("%w: %d bytes free, build expects %d of growth, floor %d", downloader.ErrInsufficientSpace, free, o.ExpectedGrowth, o.MinFreeBytes)
+	needed := neededBytes(o)
+	if !downloader.Fits(free, needed, o.MinFreeBytes) {
+		return fmt.Errorf("%w: %d bytes free, build expects %d of growth (clone plus data disk), floor %d", downloader.ErrInsufficientSpace, free, needed, o.MinFreeBytes)
 	}
 
 	img, err := downloader.VerifyCached(ctx, o.CacheDir, o.From, resource.RegistryCredentials{
@@ -161,12 +174,22 @@ func Run(ctx context.Context, o Options) (err error) {
 		return fmt.Errorf("base config.json: %w", err)
 	}
 
+	var disks []config.Disk
+	dataPath := ""
+	if o.DataDiskGiB > 0 {
+		dataPath, _ = bd.Path("data.img")
+		if err := createSparseDisk(dataPath, o.DataDiskGiB); err != nil {
+			return err
+		}
+		disks = append(disks, config.Disk{Path: dataPath})
+	}
+
 	instance, err := bootClone(ctx, o, config.MacPlatformConfigurationOptions{
 		BlockStoragePath:      diskPath,
 		AuxiliaryStoragePath:  auxPath,
 		HardwareModelData:     imgCfg.HardwareModelData,
 		MachineIdentifierData: imgCfg.MachineIdData,
-	})
+	}, disks)
 	if err != nil {
 		return err
 	}
@@ -179,7 +202,7 @@ func Run(ctx context.Context, o Options) (err error) {
 		}
 	}()
 
-	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout); err != nil {
+	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, o.DataDiskGiB<<30); err != nil {
 		return err
 	}
 	time.Sleep(stopGrace)
@@ -195,7 +218,7 @@ func Run(ctx context.Context, o Options) (err error) {
 			baseDiskDigest = l.Annotations[oci.AnnotationUncompressedDigest]
 		}
 	}
-	res, err := buildutil.Push(ctx, buildutil.PushOptions{
+	push := buildutil.PushOptions{
 		Ref:    o.To,
 		Creds:  creds,
 		Disk:   diskPath,
@@ -208,12 +231,33 @@ func Run(ctx context.Context, o Options) (err error) {
 			"com.agoda.macosvz.build.script-sha256":        scriptSHA,
 			"com.agoda.macosvz.build.machine-identifier":   "shared with the base image",
 		},
-	})
+	}
+	if dataPath != "" {
+		// A data disk is the blank disk the script filled; the boot clone is discarded.
+		push.Disk, push.Aux, push.Config = dataPath, "", ""
+	}
+	res, err := buildutil.Push(ctx, push)
 	if err != nil {
 		return err
 	}
 	logger.Infof("Pushed %s (manifest %s)", o.To, res.ManifestDigest)
 	return nil
+}
+
+// neededBytes is the disk growth a build is expected to cause; the sparse data disk is filled by
+// the script, so it counts in full.
+func neededBytes(o Options) uint64 { return o.ExpectedGrowth + o.DataDiskGiB<<30 }
+
+// createSparseDisk creates an empty raw disk image of gib GiB that takes no space until written.
+func createSparseDisk(path string, gib uint64) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Truncate(path, int64(gib<<30))
 }
 
 // cloneInputs APFS-clones disk.img and aux.img from the cached image into the build
@@ -246,12 +290,12 @@ func cloneInputs(imageDir string, bd *buildutil.BuildDir, ownerUID uint32) error
 }
 
 // bootClone starts a headless VM from the cloned disk (no overlay: the clone is the disk).
-func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurationOptions) (*vm.VirtualMachineInstance, error) {
+func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurationOptions, disks []config.Disk) (*vm.VirtualMachineInstance, error) {
 	platform, err := config.NewPlatformConfiguration(ctx, cfg, false, "build-image")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, disks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}
@@ -269,7 +313,7 @@ func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurati
 
 // provision waits for sshd, copies the script into the guest, runs it as the SSH user and
 // syncs. A non-zero script exit is an error, so nothing is pushed.
-func provision(ctx context.Context, ip string, script []byte, timeout time.Duration) error {
+func provision(ctx context.Context, ip string, script []byte, timeout time.Duration, dataDiskBytes uint64) error {
 	sshCfg, err := resourcemanager.SSHClientConfig()
 	if err != nil {
 		return err
@@ -287,12 +331,41 @@ func provision(ctx context.Context, ip string, script []byte, timeout time.Durat
 	if err := runRemote(ctx, client, `/bin/bash "$HOME/.build/script.sh"`, nil, os.Stderr, timeout); err != nil {
 		return fmt.Errorf("provisioning script: %w", err)
 	}
+	if dataDiskBytes > 0 {
+		// The host stop below is a hard stop: unmount the data disk first so its APFS container is clean.
+		if err := runRemote(ctx, client, unmountCommand(dataDiskBytes), strings.NewReader(unmountDataDiskScript), os.Stderr, 5*time.Minute); err != nil {
+			return fmt.Errorf("failed to unmount the data disk (the script must leave it with no open files): %w", err)
+		}
+	}
 	// Remove the script from the image, then flush guest writes to the virtual disk.
 	if err := runRemote(ctx, client, `rm -rf "$HOME/.build"; sync`, nil, os.Stderr, 5*time.Minute); err != nil {
 		return fmt.Errorf("failed to sync the guest: %w", err)
 	}
 	return nil
 }
+
+// unmountDataDiskScript finds the data disk and unmounts it. The data disk is the only physical
+// whole disk whose size is exactly $1 bytes (what the host created); none or several matches fail,
+// so the boot disk can never be picked by mistake.
+const unmountDataDiskScript = `set -eu
+want="$1"
+n=$(diskutil list -plist physical | plutil -extract WholeDisks raw -o - -)
+found=""
+i=0
+while [ "$i" -lt "$n" ]; do
+  d=$(diskutil list -plist physical | plutil -extract "WholeDisks.$i" raw -o - -)
+  size=$(diskutil info -plist "$d" | plutil -extract TotalSize raw -o - -)
+  if [ "$size" = "$want" ]; then found="$found $d"; fi
+  i=$((i + 1))
+done
+set -- $found
+if [ "$#" -ne 1 ]; then echo "expected one physical disk of $want bytes, found: ${found:-none}" >&2; exit 1; fi
+sync
+sudo -n diskutil unmountDisk force "/dev/$1"
+`
+
+// unmountCommand runs unmountDataDiskScript (on stdin) for a data disk of size bytes.
+func unmountCommand(size uint64) string { return fmt.Sprintf("/bin/bash -s -- %d", size) }
 
 func waitForSSH(ctx context.Context, ip string, cfg *ssh.ClientConfig, budget time.Duration) (*ssh.Client, error) {
 	deadline := time.Now().Add(budget)

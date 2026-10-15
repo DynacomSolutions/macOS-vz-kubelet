@@ -185,6 +185,7 @@ MacOSVK build-image --from <registry/ns/name:tag> --to <registry/ns/name:tag> \
 - `--from` and `--to` must both start with an entry of `VZ_ALLOWED_IMAGE_PREFIXES` (required for this command), and `--from` must be fully cached and digest-verified.
 - The disk and aux images are APFS-cloned into `<cache>/build/` (same volume), booted headless, the script runs in the guest as `VZ_SSH_USER` over the existing key, then the VM is stopped from the host (a guest shutdown leaks a VM slot on macOS 26.5).
 - The result is streamed to the registry as gzip layers with no temp file: each layer is read twice (digest first, then upload). `creds.json` is `{"username":"..","password":".."}` or `{"identityToken":".."}`, owned by root, mode 0600. The script must be root-owned and not group/other writable.
+- `--data-disk-gib N` builds a data disk instead: a blank sparse raw disk of N GiB (at most 256) is attached to the build VM as a second writable device, the script finds it and formats it (for example `diskutil eraseDisk APFS Xcode GPT diskN`), and only that disk is pushed as a one-layer image. The recipe must leave the data disk unmountable cleanly (no open files, no process using it): before the host stop the build unmounts it over SSH (`sudo -n diskutil unmountDisk force`, on the one physical disk of exactly N GiB) and fails if that does not work. The boot clone is discarded. Size N tightly: the disk is filled, so the free-space check requires `--expected-growth-gib` plus N GiB, and the disk guard reserves the full N GiB on every node that pulls the image. Pods attach the result with the `dynacom.dev/data-disks` annotation (see Storage).
 - It refuses to run while a macOS virtual machine owned by root (the provider's) is running, or one owned by a user named with `--count-vm-user` (repeatable); Linux VMs such as Colima's are not counted, and a failure to enumerate refuses the run. It honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
 
 ## Creating a base image from an IPSW
@@ -249,11 +250,20 @@ defines an exec postStart hook, Ready is gated on that hook finishing successful
 | Feature                  | Supported | Comments                                   |
 |--------------------------|:---------:|--------------------------------------------|
 | Host volumes             | ⚠️        | Denied unless allowed by `VZ_HOSTPATH_ALLOWLIST`. |
+| Data disks               | ✅        | Read-only images attached as block devices. See below. |
 | Empty dir volumes        | ✅        | `sizeLimit` is not enforced.               |
 | Persistent volumes       | ❌        | Unsupported by Virtual Kubelet in general. |
 | Config map volumes       | ❌        | On the short list.                         |
 | Secret volumes           | ❌        | On the short list.                         |
 | Projected volumes        | ⚠️        | See below.                                 |
+
+**Data disks.** The pod annotation `dynacom.dev/data-disks: "<ref>,<ref>"` attaches up to 4 disk images to the macOS VM as
+read-only virtio block devices, after the boot disk and in the listed order. Each reference must be pullable and start with an entry of
+`VZ_ALLOWED_IMAGE_PREFIXES`, with no empty entry and no duplicate, and the annotation is refused on a `dynacom.dev/linux-only` pod; an
+invalid annotation fails the create with an invalid-input error. The images are pulled in parallel with the VM image using the pod's
+registry credentials (`imagePullPolicy` does not apply: a cached copy with a matching digest is used), cached like any image and never
+evicted while a pod uses them. Two VMs share one cached file read-only. A data disk is built with `build-image --data-disk-gib`
+and cannot be booted: using one as the pod image fails with "image is a data disk, not a bootable VM image".
 
 A [projected volume](https://kubernetes.io/docs/concepts/storage/projected-volumes) maps several volume sources
 into one directory. Kubernetes adds one by default carrying the service account token, API server CA, and

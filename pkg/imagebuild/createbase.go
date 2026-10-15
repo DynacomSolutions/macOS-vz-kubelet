@@ -226,7 +226,7 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return fmt.Errorf("failed to prepare the installed guest: %w", err)
 	}
 
-	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts)
+	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,7 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
 		return err
 	}
-	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout); err != nil {
+	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, 0); err != nil {
 		return err
 	}
 	time.Sleep(stopGrace)
@@ -304,7 +304,7 @@ func installMacOS(ctx context.Context, o BaseOptions, p config.MacPlatformConfig
 	if err != nil {
 		return fmt.Errorf("failed to create platform configuration: %w", err)
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}

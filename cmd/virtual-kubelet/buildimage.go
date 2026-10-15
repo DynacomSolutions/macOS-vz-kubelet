@@ -27,6 +27,10 @@ the result to the registry. Must run as root. Needs VZ_ALLOWED_IMAGE_PREFIXES, V
 VZ_SSH_PRIVATE_KEY_PATH (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE.
 Refuses to run while a macOS virtual machine owned by root (the provider's) or by a --count-vm-user
 user is running; Linux VMs such as Colima's do not count against Apple's 2-VM cap.
+With --data-disk-gib N the result is a data disk, not a bootable image: the script finds the blank
+extra disk and formats it (diskutil eraseDisk), and only that disk is pushed.
+The script must leave the data disk unmountable cleanly (no open files, no processes using it): the
+build unmounts it over SSH before the hard stop and fails if that does not work.
 `
 
 // buildImageMain runs the build-image subcommand and returns the process exit code.
@@ -41,6 +45,7 @@ func buildImageMain(args []string) int {
 		cpu       = fs.Uint("cpu", 4, "virtual CPUs of the build VM")
 		memoryGiB = fs.Uint64("memory-gib", 8, "memory of the build VM in GiB")
 		growthGiB = fs.Uint64("expected-growth-gib", 10, "disk growth of the clone expected from the script, in GiB")
+		dataGiB   = fs.Uint64("data-disk-gib", 0, "build a read-only data disk instead of a bootable image: attach a blank sparse disk of this many GiB (at most 256) to the build VM (the script formats and fills it, and leaves it unmountable cleanly) and push only that disk; 0 builds a normal image")
 		timeout   = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
 		logLevel  = fs.String("log-level", "info", "log level")
 	)
@@ -100,6 +105,7 @@ func buildImageMain(args []string) int {
 		CPU:              *cpu,
 		MemoryBytes:      *memoryGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
+		DataDiskGiB:      *dataGiB,
 		ScriptTimeout:    *timeout,
 		CountVMUsers:     countUsers,
 	})
