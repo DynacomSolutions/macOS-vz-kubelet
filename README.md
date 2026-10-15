@@ -187,6 +187,21 @@ MacOSVK build-image --from <registry/ns/name:tag> --to <registry/ns/name:tag> \
 - The result is streamed to the registry as gzip layers with no temp file: each layer is read twice (digest first, then upload). `creds.json` is `{"username":"..","password":".."}` or `{"identityToken":".."}`, owned by root, mode 0600. The script must be root-owned and not group/other writable.
 - It refuses to run while a macOS virtual machine owned by root (the provider's) is running, or one owned by a user named with `--count-vm-user` (repeatable); Linux VMs such as Colima's are not counted, and a failure to enumerate refuses the run. It honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
 
+## Creating a base image from an IPSW
+
+`MacOSVK create-base` (root only, never a Pod feature) installs macOS from an Apple IPSW and pushes the result as a base image, with no other tooling:
+
+```
+MacOSVK create-base --ipsw-url https://... --ipsw-sha256 <hex> \
+  --to registry.s.dynacom.dev/macos-vz/<name>:<tag> \
+  --script /abs/path/script.sh --creds /abs/path/creds.json [--cpu N --memory-gib N --disk-gib N]
+```
+
+- `--to` must be under `registry.s.dynacom.dev/macos-vz/`. The IPSW is downloaded over HTTPS into `<cache>/create-base/`, its SHA-256 is verified (a mismatch fails and deletes the download) and a verified cached copy is reused.
+- macOS is installed with `VZMacOSInstaller` using the restore image's most featureful supported configuration. Setup Assistant is skipped by seeding the guest's data volume from the host (user `admin`, `.AppleSetupDone`, sshd on, `authorized_keys` for the `VZ_SSH_PRIVATE_KEY_*` key; `VZ_SSH_USER` must be `admin`). On first boot, passwordless sudo, key-only sshd and the admin group are configured over SSH and FileVault is checked to be off. Then the script runs, the VM is stopped from the host and the image is pushed.
+- `creds.json` is `{"username":"..","password":"..","guest_password":".."}` (`identityToken` may replace username and password), root-owned, mode 0600. The guest password is never printed.
+- It refuses to run while a macOS virtual machine owned by root (or a `--count-vm-user` user) is running.
+
 ## Feature overview
 
 The tables below list supported Kubernetes features. Anything not listed is unsupported.

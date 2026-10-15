@@ -62,33 +62,11 @@ func getSSHAuthMethods() (string, []ssh.AuthMethod, error) {
 
 	var auth []ssh.AuthMethod
 
-	privateKey := ""
-	if keyBase64 := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_BASE64")); keyBase64 != "" {
-		keyData, err := base64.StdEncoding.DecodeString(keyBase64)
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to decode VZ_SSH_PRIVATE_KEY_BASE64: %v", err)
-		}
-		privateKey = string(keyData)
-	} else if keyPath := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_PATH")); keyPath != "" {
-		keyData, err := os.ReadFile(keyPath)
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to read VZ_SSH_PRIVATE_KEY_PATH: %v", err)
-		}
-		privateKey = string(keyData)
+	signer, err := privateKeySigner()
+	if err != nil {
+		return "", nil, err
 	}
-
-	if privateKey != "" {
-		var signer ssh.Signer
-		var err error
-
-		if passphrase := os.Getenv("VZ_SSH_PRIVATE_KEY_PASSPHRASE"); passphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(privateKey), []byte(passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey([]byte(privateKey))
-		}
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to parse VZ_SSH_PRIVATE_KEY: %v", err)
-		}
+	if signer != nil {
 		auth = append(auth, ssh.PublicKeys(signer))
 	}
 
@@ -101,4 +79,50 @@ func getSSHAuthMethods() (string, []ssh.AuthMethod, error) {
 	}
 
 	return sshUser, auth, nil
+}
+
+// privateKeySigner loads the key named by VZ_SSH_PRIVATE_KEY_BASE64 or VZ_SSH_PRIVATE_KEY_PATH;
+// it returns nil, nil when neither is set.
+func privateKeySigner() (ssh.Signer, error) {
+	privateKey := ""
+	if keyBase64 := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_BASE64")); keyBase64 != "" {
+		keyData, err := base64.StdEncoding.DecodeString(keyBase64)
+		if err != nil {
+			return nil, errdefs.InvalidInputf("failed to decode VZ_SSH_PRIVATE_KEY_BASE64: %v", err)
+		}
+		privateKey = string(keyData)
+	} else if keyPath := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_PATH")); keyPath != "" {
+		keyData, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, errdefs.InvalidInputf("failed to read VZ_SSH_PRIVATE_KEY_PATH: %v", err)
+		}
+		privateKey = string(keyData)
+	}
+	if privateKey == "" {
+		return nil, nil
+	}
+
+	var signer ssh.Signer
+	var err error
+	if passphrase := os.Getenv("VZ_SSH_PRIVATE_KEY_PASSPHRASE"); passphrase != "" {
+		signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(privateKey), []byte(passphrase))
+	} else {
+		signer, err = ssh.ParsePrivateKey([]byte(privateKey))
+	}
+	if err != nil {
+		return nil, errdefs.InvalidInputf("failed to parse VZ_SSH_PRIVATE_KEY: %v", err)
+	}
+	return signer, nil
+}
+
+// SSHAuthorizedKey returns the public half of the configured guest key as an authorized_keys line.
+func SSHAuthorizedKey() (string, error) {
+	signer, err := privateKeySigner()
+	if err != nil {
+		return "", err
+	}
+	if signer == nil {
+		return "", errdefs.InvalidInputf("VZ_SSH_PRIVATE_KEY_BASE64 or VZ_SSH_PRIVATE_KEY_PATH env variable is required")
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), nil
 }
