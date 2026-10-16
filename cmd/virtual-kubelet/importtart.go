@@ -13,6 +13,9 @@ import (
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/tart"
+	"github.com/sirupsen/logrus"
+	"github.com/virtual-kubelet/virtual-kubelet/log"
+	logruslogger "github.com/virtual-kubelet/virtual-kubelet/log/logrus"
 )
 
 func importTartMain(args []string) int {
@@ -62,6 +65,8 @@ func importTartMain(args []string) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	log.L = logruslogger.FromLogrus(logrus.NewEntry(logrus.New()))
+	ctx = log.WithLogger(ctx, log.L)
 	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict})
 	if err != nil {
 		return fail(err)

@@ -116,15 +116,19 @@ func MakeRoom(ctx context.Context, root string, protected map[string]bool, neede
 	if !ok {
 		return fmt.Errorf("%w: need %d bytes plus floor %d, available %d, and no unused cached image can be evicted to make room", ErrInsufficientSpace, needed, floor, avail)
 	}
+	// One at a time, re-measuring: clones or snapshots can keep deleted blocks
+	// allocated, so stop as soon as it fits.
 	for _, e := range evict {
+		if Fits(avail, needed, floor) {
+			return nil
+		}
 		log.G(ctx).Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space", e.Dir, e.Size, e.LastUsed.Format(time.RFC3339))
 		if err := EvictDir(e.Dir); err != nil {
 			return fmt.Errorf("failed to evict %s: %w", e.Dir, err)
 		}
-	}
-	// Re-measure: snapshots can keep deleted blocks allocated.
-	if avail, err = free(); err != nil {
-		return err
+		if avail, err = free(); err != nil {
+			return err
+		}
 	}
 	if !Fits(avail, needed, floor) {
 		return fmt.Errorf("%w: need %d bytes plus floor %d, available %d after eviction", ErrInsufficientSpace, needed, floor, avail)

@@ -4,12 +4,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/diskguard"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
+	"github.com/virtual-kubelet/virtual-kubelet/log"
+	logruslogger "github.com/virtual-kubelet/virtual-kubelet/log/logrus"
 )
 
 func TestMakeRoomEvictsLRUNeverLocal(t *testing.T) {
@@ -71,4 +76,28 @@ func TestMakeRoomEvictsNothingWhenHopeless(t *testing.T) {
 	err := diskguard.MakeRoom(context.Background(), root, map[string]bool{d: true}, 1<<40, 0, func() (uint64, error) { return 0, nil })
 	require.ErrorIs(t, err, diskguard.ErrInsufficientSpace)
 	require.FileExists(t, filepath.Join(d, "disk.img"), "protected destination must survive")
+}
+
+func TestMakeRoomLogsEviction(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "a")
+	require.NoError(t, os.Mkdir(d, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(d, "disk.img"), make([]byte, 1<<20), 0o600))
+	l, hook := logrustest.NewNullLogger()
+	ctx := log.WithLogger(context.Background(), logruslogger.FromLogrus(logrus.NewEntry(l)))
+	evicted := false
+	err := diskguard.MakeRoom(ctx, root, nil, 100, 0, func() (uint64, error) {
+		if _, e := os.Stat(d); os.IsNotExist(e) {
+			evicted = true
+			return 1000, nil
+		}
+		return 0, nil
+	})
+	require.NoError(t, err)
+	require.True(t, evicted)
+	var found bool
+	for _, e := range hook.AllEntries() {
+		found = found || strings.Contains(e.Message, "Evicting unused cached image "+d)
+	}
+	require.True(t, found, "eviction must be logged")
 }

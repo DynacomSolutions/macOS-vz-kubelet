@@ -218,7 +218,9 @@ If the import does not fit above `VZ_MIN_FREE_BYTES`, it fails with
 cached images under `<cache-dir>/blobs` first, using the downloader's eviction logic,
 and fail only if it still does not fit. Local-only images (those with a
 `.local-manifest.json`) and the destination reference are never evicted, and each
-eviction is logged with its reference directory and size. **Only use `--evict` when
+eviction is logged with its reference directory and size. Entries are evicted
+one at a time and free space is re-read after each, but APFS clones or snapshots can
+keep deleted blocks allocated, so evictions may free less than expected. **Only use `--evict` when
 no macOS Pod is running**: the one-shot importer cannot see which cached images
 running VMs use, and VM disks are APFS clones with no link back to the cache entry,
 so no reliable in-use signal exists. Stop or drain the node first (the cluster's
