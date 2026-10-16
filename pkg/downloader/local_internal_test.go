@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,8 +13,11 @@ import (
 	"testing"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,4 +65,41 @@ func TestLocalImportNeverResolvesRegistry(t *testing.T) {
 			require.Zero(t, requests.Load())
 		})
 	}
+}
+
+func TestFailedAlwaysPullKeepsLocalLayer(t *testing.T) {
+	var manifest []byte
+	var blobRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/manifests/") {
+			w.Header().Set("Content-Type", ocispec.MediaTypeImageManifest)
+			w.Header().Set("Content-Length", fmt.Sprint(len(manifest)))
+			w.Header().Set("Docker-Content-Digest", digest.FromBytes(manifest).String())
+			if r.Method != http.MethodHead {
+				_, _ = w.Write(manifest)
+			}
+			return
+		}
+		blobRequests.Add(1)
+		http.Error(w, "interrupted blob", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	ref := strings.TrimPrefix(srv.URL, "http://") + "/local:base"
+	cache := t.TempDir()
+	input := filepath.Join(t.TempDir(), "disk.img")
+	require.NoError(t, os.WriteFile(input, []byte("original disk"), 0600))
+	_, err := buildutil.CacheLocal(context.Background(), buildutil.PushOptions{Ref: ref, Disk: input}, cache)
+	require.NoError(t, err)
+	dir, err := ImageDir(cache, ref)
+	require.NoError(t, err)
+	manifest, err = os.ReadFile(filepath.Join(dir, oci.LocalManifestName))
+	require.NoError(t, err)
+	_, err = Download(context.Background(), Params{Ref: ref, StorePath: cache, IgnoreExisiting: true, MinFreeBytes: 1, MaxAttempts: 1}, event.LogEventRecorder{})
+	require.Error(t, err)
+	require.Positive(t, blobRequests.Load(), "failure must occur after manifest resolution")
+	got, err := os.ReadFile(filepath.Join(dir, "disk.img"))
+	require.NoError(t, err)
+	require.Equal(t, "original disk", string(got))
+	_, err = Download(context.Background(), Params{Ref: ref, StorePath: cache, MaxAttempts: 1}, event.LogEventRecorder{})
+	require.NoError(t, err, "IfNotPresent must still use the local import")
 }

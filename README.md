@@ -213,10 +213,12 @@ building; `--creds` authenticates only that destination. Credential files use th
 registry schema above, must belong to the invoking user and have mode 0600.
 No destination credentials are needed for a local import.
 
-The importer shares the build lock, checks the full logical disk size plus
-auxiliary storage, a 1 GiB margin and `VZ_MIN_FREE_BYTES`, and removes temporary
+The importer shares the build lock, estimates storage from the uncompressed sizes of
+non-zero chunks plus auxiliary storage, a small metadata margin, 1 GiB and
+`VZ_MIN_FREE_BYTES`, and removes temporary
 files on success or failure. Downloads and decompression are streamed with digest
-checks; zero blocks remain sparse. The pinned image has a 140,000,000,000-byte raw
+checks; zero blocks remain sparse. Each blob has up to five download attempts
+with backoff and ranged resume when supported by the source. The pinned image has a 140,000,000,000-byte raw
 disk. Local imports hash the same gzip representation as a push, then move the
 unpacked files on the same volume, without storing a compressed copy or copying
 the full disk again. Existing destination cache directories are refused; choose

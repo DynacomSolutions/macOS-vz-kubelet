@@ -154,6 +154,10 @@ func requiredBytes(layers []ocispec.Descriptor, workingDir string, ignoreExistin
 // removeStale deletes outputs (and leftover .partial-* files) of layers about to be
 // pulled: they are invalid or being replaced, and would otherwise hold disk twice.
 func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
+	// A local image may have no registry copy. Keep its layers until replacement succeeds.
+	if oci.HasLocalManifest(dir) {
+		return
+	}
 	for _, l := range layers {
 		name := l.Annotations[ocispec.AnnotationTitle]
 		if name == "" || (!ignoreExisting && isCached(l, dir)) {
@@ -178,7 +182,7 @@ func fits(free, needed, floor uint64) bool { return diskguard.Fits(free, needed,
 func selectEvictions(entries []cacheEntry, inUse map[string]bool, free, needed, floor uint64) (evict []cacheEntry, ok bool) {
 	var cands []cacheEntry
 	for _, e := range entries {
-		if !inUse[e.dir] {
+		if !inUse[e.dir] && !oci.HasLocalManifest(e.dir) {
 			cands = append(cands, e)
 		}
 	}
@@ -200,6 +204,10 @@ func listCache(root string) (entries []cacheEntry) {
 		if err != nil || !d.IsDir() || p == root {
 			return nil
 		}
+		if oci.HasLocalManifest(p) {
+			log.G(context.Background()).Infof("Protecting local-only cached image %s from eviction", p)
+			return fs.SkipDir
+		}
 		e := cacheEntry{dir: p, size: allocatedBytes(p)}
 		if e.size == 0 {
 			return nil
@@ -216,6 +224,9 @@ func listCache(root string) (entries []cacheEntry) {
 // evictDir removes the files directly inside an image directory, then the directory
 // itself if it is now empty. It never recurses, so a nested image directory survives.
 func evictDir(dir string) error {
+	if oci.HasLocalManifest(dir) {
+		return fmt.Errorf("refusing to evict local-only image %s", dir)
+	}
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return err

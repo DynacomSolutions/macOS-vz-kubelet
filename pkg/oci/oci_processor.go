@@ -108,7 +108,7 @@ func (s *Store) processCompressedContent(ctx context.Context, expected ocispec.D
 	return nil
 }
 
-// processRegularContent handles content that is not compressed, saving it directly.
+// processRegularContent verifies a private partial before replacing an existing layer.
 func (s *Store) processRegularContent(ctx context.Context, expected ocispec.Descriptor, content io.Reader, outputFilePath string) (err error) {
 	ctx, span := trace.StartSpan(ctx, "OCI.processRegularContent")
 	defer func() {
@@ -116,16 +116,21 @@ func (s *Store) processRegularContent(ctx context.Context, expected ocispec.Desc
 		span.End()
 	}()
 
-	fp, err := os.Create(outputFilePath)
+	fp, err := os.CreateTemp(filepath.Dir(outputFilePath), filepath.Base(outputFilePath)+".partial-*")
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 	defer func() {
 		err = errors.Join(err, fp.Close())
+		_ = os.Remove(fp.Name())
 	}()
 
 	if err = s.saveFile(ctx, fp, expected, content); err != nil {
 		return fmt.Errorf("failed to save content: %w", err)
+	}
+
+	if err = os.Rename(fp.Name(), outputFilePath); err != nil {
+		return err
 	}
 
 	// Since file was saved successfully, store the digest and path

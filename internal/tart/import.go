@@ -66,10 +66,7 @@ type blobSource interface {
 }
 
 func fetch(ctx context.Context, repo blobSource, d ocispec.Descriptor, consume func(io.Reader) error) error {
-	r, err := repo.Fetch(ctx, d)
-	if err != nil {
-		return err
-	}
+	r := &retryReader{ctx: ctx, source: repo, desc: d}
 	defer r.Close()
 	return verifiedCopy(r, d, consume)
 }
@@ -138,8 +135,10 @@ func Run(ctx context.Context, o Options) (result buildutil.PushResult, err error
 	if err != nil {
 		return result, err
 	}
-	// Include auxiliary storage, config and a 1 GiB margin as well as the configured floor.
-	needed := uint64(m.DiskSize) + uint64(m.NVRAM.Size) + maxMetadataSize + (1 << 30)
+	needed, err := requiredSpace(m)
+	if err != nil {
+		return result, err
+	}
 	if !diskguard.Fits(free, needed, o.MinFreeBytes) {
 		return result, fmt.Errorf("%w: import needs %d bytes plus floor %d, available %d", diskguard.ErrInsufficientSpace, needed, o.MinFreeBytes, free)
 	}

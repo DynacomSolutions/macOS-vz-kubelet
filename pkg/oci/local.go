@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
@@ -174,4 +176,46 @@ func localLayerDigest(l ocispec.Descriptor) digest.Digest {
 		return digest.Digest(d)
 	}
 	return l.Digest
+}
+
+// HasLocalManifest protects even damaged local markers from destructive fallback.
+func HasLocalManifest(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, LocalManifestName))
+	return !os.IsNotExist(err)
+}
+
+// CleanupStaleImports removes abandoned private staging directories. Symlinks
+// are never followed, and directories belonging to another user are skipped.
+// Call while holding the shared build lock so an active import is not removed.
+func CleanupStaleImports(cacheDir string) error {
+	root := filepath.Join(cacheDir, "blobs")
+	cutoff := time.Now().Add(-time.Hour)
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != uint32(os.Geteuid()) {
+			return fs.SkipDir
+		}
+		if path != root && strings.HasPrefix(entry.Name(), ".import-") {
+			if info.ModTime().Before(cutoff) {
+				if err := os.RemoveAll(path); err != nil {
+					return err
+				}
+			}
+			return fs.SkipDir
+		}
+		return nil
+	})
 }

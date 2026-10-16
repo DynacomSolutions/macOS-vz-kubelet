@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 )
 
 // fixedNames are the only files a build directory holds; callers never supply a file name.
@@ -38,6 +40,10 @@ func NewBuildDir(root string) (*BuildDir, error) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lock.Close()
 		return nil, fmt.Errorf("another build-image run holds the lock in %q: %w", root, err)
+	}
+	if err := oci.CleanupStaleImports(filepath.Dir(root)); err != nil {
+		lock.Close()
+		return nil, err
 	}
 	// Holding the lock, anything else in root is a leftover of a killed run.
 	entries, _ := os.ReadDir(root)
