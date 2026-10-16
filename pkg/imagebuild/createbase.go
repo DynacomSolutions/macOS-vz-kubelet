@@ -16,7 +16,8 @@ package imagebuild
 //     (turns sshd on) and ~admin/.ssh/authorized_keys. See buildutil.SeedDataVolume.
 //
 // The same seed also adds the user to the admin group (sudo needs it), writes the passwordless
-// sudoers.d entry and a key-only sshd drop-in, so sshd is key-only from the first boot and the
+// sudoers.d entry and a key-only sshd drop-in, and writes the system TCC.db (Full Disk Access and
+// PostEvent for sshd-keygen-wrapper; SIP blocks that write over SSH later), so sshd is key-only from the first boot and the
 // password never crosses SSH. The first boot only verifies the result; FileVault is off by default
 // and is verified too.
 //
@@ -450,6 +451,10 @@ func seedGuest(ctx context.Context, tmpRoot, diskPath string, spec buildutil.See
 			_, err := run(ctx, nil, plistBuddy, "-c", "Add :"+key+": string "+value, file)
 			return err
 		},
+		SQL: func(db, sql string) error {
+			_, err := run(ctx, []byte(sql), "/usr/bin/sqlite3", "-bail", db)
+			return err
+		},
 		BinaryPlist: func(x []byte) ([]byte, error) {
 			return run(ctx, x, "/usr/bin/plutil", "-convert", "binary1", "-o", "-", "-")
 		},
@@ -554,9 +559,11 @@ sudo -n true
 t=$(sudo -n /usr/sbin/sshd -T)
 printf '%s\n' "$t" | grep -qx 'passwordauthentication no'
 printf '%s\n' "$t" | grep -qx 'kbdinteractiveauthentication no'
-/usr/bin/fdesetup status | grep -q 'FileVault is Off'`
+/usr/bin/fdesetup status | grep -q 'FileVault is Off'
+n=$(sudo -n /usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select count(*) from access where client='/usr/libexec/sshd-keygen-wrapper' and auth_value=2 and service in ('kTCCServiceSystemPolicyAllFiles','kTCCServicePostEvent')")
+[ "$n" = 2 ] || { echo "TCC grants for sshd-keygen-wrapper missing (found ${n:-none}, want 2)" >&2; exit 1; }`
 	if err := runRemote(ctx, client, verify, nil, os.Stderr, time.Minute); err != nil {
-		return fmt.Errorf("guest verification failed (passwordless sudo, admin group, key-only sshd, FileVault off): %w", err)
+		return fmt.Errorf("guest verification failed (passwordless sudo, admin group, key-only sshd, FileVault off, TCC grants): %w", err)
 	}
 	return nil
 }

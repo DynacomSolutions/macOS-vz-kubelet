@@ -122,7 +122,12 @@ func TestSeedDataVolume(t *testing.T) {
 	type app struct{ file, key, value string }
 	var appended []app
 	var enabled []string
+	var sqlDB, sqlText []string
 	h := SeedHooks{
+		SQL: func(db, sql string) error {
+			sqlDB, sqlText = append(sqlDB, db), append(sqlText, sql)
+			return os.WriteFile(db, nil, 0o600) // sqlite3 creates the file
+		},
 		Chown: func(p string, uid, gid int) error {
 			chowned = append(chowned, fmt.Sprintf("%s %d:%d", filepath.Base(p), uid, gid))
 			return nil
@@ -171,11 +176,46 @@ func TestSeedDataVolume(t *testing.T) {
 	assert.Contains(t, chowned, "dynacom-admin 0:0")
 	assert.Contains(t, chowned, "000-dynacom.conf 0:0")
 
+	// TCC.db: seeded once, with the schema when absent
+	tcc := filepath.Join(root, "Library/Application Support/com.apple.TCC/TCC.db")
+	assert.Equal(t, []string{tcc}, sqlDB)
+	require.Len(t, sqlText, 1)
+	for _, want := range []string{"CREATE TABLE access", "insert into admin values('version',30)", "kTCCServiceSystemPolicyAllFiles", "kTCCServicePostEvent", "/usr/libexec/sshd-keygen-wrapper"} {
+		assert.Contains(t, sqlText[0], want)
+	}
+	assert.Contains(t, chowned, "TCC.db 0:0")
+
 	// never overwrite an existing user
 	assert.ErrorContains(t, SeedDataVolume(root, s, h), "already exists")
 	// no local node and no template: refuse
 	s.TemplateDir = ""
 	assert.Error(t, SeedDataVolume(t.TempDir(), s, h))
+}
+
+func TestSeedDataVolumeKeepsExistingTCCDB(t *testing.T) {
+	root := t.TempDir()
+	node := filepath.Join(root, "private/var/db/dslocal/nodes/Default")
+	require.NoError(t, os.MkdirAll(filepath.Join(node, "users"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(node, "groups"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(node, "users/root.plist"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(node, "groups/admin.plist"), nil, 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "private/etc"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "private/etc/sudoers"), []byte("@includedir /etc/sudoers.d\n"), 0o440))
+	tcc := filepath.Join(root, "Library/Application Support/com.apple.TCC/TCC.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(tcc), 0o755))
+	require.NoError(t, os.WriteFile(tcc, []byte("x"), 0o600))
+	var sqlText string
+	h := SeedHooks{
+		Chown:         func(string, int, int) error { return nil },
+		AppendToArray: func(string, string, string) error { return nil },
+		EnableService: func(string, string) error { return nil },
+		SQL:           func(db, sql string) error { sqlText = sql; return nil },
+	}
+	require.NoError(t, SeedDataVolume(root, SeedSpec{User: "admin", Password: "pw", UID: 501, GID: 20, AuthorizedKey: "k"}, h))
+	assert.Contains(t, sqlText, "kTCCServicePostEvent")
+	assert.NotContains(t, sqlText, "CREATE TABLE")
+	fi, _ := os.Stat(tcc)
+	assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm())
 }
 
 func TestSeedDataVolumeEditsExistingLaunchdPlist(t *testing.T) {
@@ -194,6 +234,7 @@ func TestSeedDataVolumeEditsExistingLaunchdPlist(t *testing.T) {
 		Chown:         func(string, int, int) error { return nil },
 		AppendToArray: func(string, string, string) error { return nil },
 		EnableService: func(f, l string) error { enabled = append(enabled, filepath.Base(f)+" "+l); return nil },
+		SQL:           func(db, _ string) error { return os.WriteFile(db, nil, 0o600) },
 	}
 	s := SeedSpec{User: "admin", Password: "pw", UID: 501, GID: 20, AuthorizedKey: "k"}
 	require.NoError(t, SeedDataVolume(root, s, h))

@@ -38,7 +38,25 @@ type SeedHooks struct {
 	AppendToArray func(file, key, value string) error
 	// BinaryPlist converts an XML plist to binary form; nil keeps XML.
 	BinaryPlist func(xml []byte) ([]byte, error)
+	// SQL runs sql against the SQLite database file db, creating it when missing.
+	SQL func(db, sql string) error
 }
+
+// tccSchema is the schema from macOS 26.0 TCC.db, admin version 30; tccd migrates older versions forward.
+const tccSchema = `CREATE TABLE admin (key TEXT PRIMARY KEY NOT NULL, value INTEGER NOT NULL);;
+CREATE TABLE policies (    id        INTEGER    NOT NULL PRIMARY KEY,     bundle_id    TEXT    NOT NULL,     uuid        TEXT    NOT NULL,     display        TEXT    NOT NULL,     UNIQUE (bundle_id, uuid));;
+CREATE TABLE active_policy (    client        TEXT    NOT NULL,     client_type    INTEGER    NOT NULL,     policy_id    INTEGER NOT NULL,     PRIMARY KEY (client, client_type),     FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE ON UPDATE CASCADE);;
+CREATE INDEX active_policy_id ON active_policy(policy_id);;
+CREATE TABLE access (    service        TEXT        NOT NULL,     client         TEXT        NOT NULL,     client_type    INTEGER     NOT NULL,     auth_value     INTEGER     NOT NULL,     auth_reason    INTEGER     NOT NULL,     auth_version   INTEGER     NOT NULL,     csreq          BLOB,     policy_id      INTEGER,     indirect_object_identifier_type    INTEGER,     indirect_object_identifier         TEXT NOT NULL DEFAULT 'UNUSED',     indirect_object_code_identity      BLOB,     flags          INTEGER,     last_modified  INTEGER     NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),     pid            INTEGER,     pid_version    INTEGER,     boot_uuid      TEXT NOT NULL DEFAULT 'UNUSED',     last_reminded  INTEGER     NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),     PRIMARY KEY (service, client, client_type, indirect_object_identifier),    FOREIGN KEY (policy_id) REFERENCES policies(id) ON DELETE CASCADE ON UPDATE CASCADE);;
+CREATE TABLE access_overrides (    service        TEXT    NOT NULL PRIMARY KEY);;
+CREATE TABLE expired (    service        TEXT        NOT NULL,     client         TEXT        NOT NULL,     client_type    INTEGER     NOT NULL,     csreq          BLOB,     last_modified  INTEGER     NOT NULL ,     expired_at     INTEGER     NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),     PRIMARY KEY (service, client, client_type));;
+insert into admin values('version',30);
+`
+
+// tccRows grants the SSH responsible client Full Disk Access and PostEvent; the other NOT NULL
+// columns of access have defaults.
+const tccRows = `insert or replace into access (service,client,client_type,auth_value,auth_reason,auth_version,flags) values ('kTCCServiceSystemPolicyAllFiles','/usr/libexec/sshd-keygen-wrapper',1,2,4,1,0),('kTCCServicePostEvent','/usr/libexec/sshd-keygen-wrapper',1,2,4,1,0);
+`
 
 const pbkdf2Iterations = 100000
 
@@ -77,7 +95,8 @@ func checkSudoersInclude(dataRoot, systemRoot string) error {
 // that it boots past Setup Assistant to a login window with SSH on: the local user (with a
 // SALTED-SHA512-PBKDF2 shadow hash), /var/db/.AppleSetupDone, sshd enabled in launchd's
 // disabled.plist, the user's home with authorized_keys, membership of the admin group (sudo needs
-// it), the passwordless sudoers.d entry and a key-only sshd drop-in. Nothing needs the password
+// it), the passwordless sudoers.d entry and a key-only sshd drop-in, and the system TCC database granting /usr/libexec/sshd-keygen-wrapper
+// Full Disk Access and PostEvent (SIP blocks every later write over SSH). Nothing needs the password
 // after the first boot, so it never crosses SSH. It refuses to touch an existing user.
 func SeedDataVolume(root string, s SeedSpec, h SeedHooks) error {
 	if s.User == "" || s.Password == "" || s.AuthorizedKey == "" || strings.ContainsAny(s.User, "/\x00") {
@@ -129,6 +148,25 @@ func SeedDataVolume(root string, s SeedSpec, h SeedHooks) error {
 		return err
 	}
 	if err := putFile(filepath.Join(root, "private/etc/ssh/sshd_config.d/000-dynacom.conf"), []byte(SSHDDropIn), 0o644, 0, 0, h.Chown); err != nil {
+		return err
+	}
+
+	tccDir := filepath.Join(root, "Library/Application Support/com.apple.TCC")
+	tccDB := filepath.Join(tccDir, "TCC.db")
+	if err := mkdirOwned(tccDir, 0o755, 0, 0, h.Chown); err != nil {
+		return err
+	}
+	sql := tccRows
+	if _, err := os.Stat(tccDB); err != nil {
+		sql = tccSchema + tccRows
+	}
+	if err := h.SQL(tccDB, sql); err != nil {
+		return fmt.Errorf("seeding the TCC database: %w", err)
+	}
+	if err := os.Chmod(tccDB, 0o644); err != nil {
+		return err
+	}
+	if err := h.Chown(tccDB, 0, 0); err != nil {
 		return err
 	}
 
