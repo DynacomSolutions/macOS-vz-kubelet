@@ -83,10 +83,10 @@ func TestFits(t *testing.T) {
 func TestSelectEvictions(t *testing.T) {
 	base := time.Unix(1000, 0)
 	entries := []cacheEntry{
-		{dir: "new", size: 30 * gib, lastUsed: base.Add(3 * time.Hour)},
-		{dir: "busy", size: 60 * gib, lastUsed: base},
-		{dir: "old", size: 30 * gib, lastUsed: base.Add(time.Hour)},
-		{dir: "mid", size: 30 * gib, lastUsed: base.Add(2 * time.Hour)},
+		{Dir: "new", Size: 30 * gib, LastUsed: base.Add(3 * time.Hour)},
+		{Dir: "busy", Size: 60 * gib, LastUsed: base},
+		{Dir: "old", Size: 30 * gib, LastUsed: base.Add(time.Hour)},
+		{Dir: "mid", Size: 30 * gib, LastUsed: base.Add(2 * time.Hour)},
 	}
 	inUse := map[string]bool{"busy": true}
 
@@ -111,7 +111,7 @@ func TestSelectEvictions(t *testing.T) {
 		ev, ok := selectEvictions(entries, inUse, 1*gib, 200*gib, 15*gib)
 		assert.False(t, ok)
 		for _, e := range ev {
-			assert.NotEqual(t, "busy", e.dir)
+			assert.NotEqual(t, "busy", e.Dir)
 		}
 	})
 }
@@ -125,8 +125,8 @@ func TestListCache(t *testing.T) {
 
 	got := listCache(root)
 	require.Len(t, got, 1)
-	assert.Equal(t, img, got[0].dir)
-	assert.GreaterOrEqual(t, got[0].size, uint64(7))
+	assert.Equal(t, img, got[0].Dir)
+	assert.GreaterOrEqual(t, got[0].Size, uint64(7))
 
 	// sparse files count by allocated bytes, not logical size
 	f, err := os.Create(filepath.Join(img, "sparse.img"))
@@ -135,12 +135,12 @@ func TestListCache(t *testing.T) {
 	require.NoError(t, f.Close())
 	got = listCache(root)
 	require.Len(t, got, 1)
-	assert.Less(t, got[0].size, uint64(1<<20))
+	assert.Less(t, got[0].Size, uint64(1<<20))
 }
 
 func dirs(es []cacheEntry) (out []string) {
 	for _, e := range es {
-		out = append(out, e.dir)
+		out = append(out, e.Dir)
 	}
 	return out
 }
@@ -156,7 +156,7 @@ func TestListCacheImageDirsAreLeaves(t *testing.T) {
 
 	got := listCache(root)
 	require.Len(t, got, 1, "the cache root and anything below an image dir are not entries")
-	assert.Equal(t, outer, got[0].dir)
+	assert.Equal(t, outer, got[0].Dir)
 }
 
 func TestEvictDirKeepsNestedImage(t *testing.T) {
@@ -228,12 +228,12 @@ func TestLocalImagesSurviveEvictionAndStaleRemoval(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(local, oci.LocalManifestName), []byte("marker"), 0600))
 	entries := listCache(root)
 	require.Len(t, entries, 1)
-	require.Equal(t, remote, entries[0].dir)
-	evictions, ok := selectEvictions([]cacheEntry{{dir: local, size: 100}, {dir: remote, size: 10}}, nil, 0, 10, 0)
+	require.Equal(t, remote, entries[0].Dir)
+	evictions, ok := selectEvictions([]cacheEntry{{Dir: local, Size: 100}, {Dir: remote, Size: 10}}, nil, 0, 10, 0)
 	require.True(t, ok)
 	require.Len(t, evictions, 1)
-	require.Equal(t, remote, evictions[0].dir)
-	_, ok = selectEvictions([]cacheEntry{{dir: local, size: 100}}, nil, 0, 10, 0)
+	require.Equal(t, remote, evictions[0].Dir)
+	_, ok = selectEvictions([]cacheEntry{{Dir: local, Size: 100}}, nil, 0, 10, 0)
 	require.False(t, ok)
 	require.Error(t, evictDir(local))
 	removeStale([]ocispec.Descriptor{{Annotations: map[string]string{ocispec.AnnotationTitle: "disk.img"}}}, local, true)

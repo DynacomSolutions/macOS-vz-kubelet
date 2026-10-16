@@ -25,6 +25,9 @@ type Options struct {
 	SourceCredentials, DestinationCredentials buildutil.Credentials
 	MinFreeBytes                              uint64
 	Local                                     bool
+	// Evict lets the import delete least-recently-used cached images to make room. The
+	// caller must ensure no Pod uses the cache: nothing here can see running VMs.
+	Evict bool
 }
 
 // verifiedCopy bounds the read and verifies both the size and digest, including for
@@ -140,7 +143,12 @@ func Run(ctx context.Context, o Options) (result buildutil.PushResult, err error
 		return result, err
 	}
 	if !diskguard.Fits(free, needed, o.MinFreeBytes) {
-		return result, fmt.Errorf("%w: import needs %d bytes plus floor %d, available %d", diskguard.ErrInsufficientSpace, needed, o.MinFreeBytes, free)
+		if !o.Evict {
+			return result, fmt.Errorf("%w: import needs %d bytes plus floor %d, available %d (--evict can remove unused cached images when no Pod is running)", diskguard.ErrInsufficientSpace, needed, o.MinFreeBytes, free)
+		}
+		if err := makeRoom(ctx, o, bd.Dir(), needed); err != nil {
+			return result, err
+		}
 	}
 	ctx, stop := diskguard.WatchFreeSpace(ctx, bd.Dir(), o.MinFreeBytes)
 	defer stop()
@@ -214,4 +222,15 @@ func writeFile(path string, write func(*os.File) error) error {
 	}
 	err = write(f)
 	return errors.Join(err, f.Close())
+}
+
+// makeRoom evicts least-recently-used cached images (never the destination, never a
+// local-only import) until the import fits. Free space is read from the build directory's volume.
+func makeRoom(ctx context.Context, o Options, buildDir string, needed uint64) error {
+	dst, err := oci.ImageDir(o.CacheDir, o.Destination)
+	if err != nil {
+		return err
+	}
+	return diskguard.MakeRoom(ctx, filepath.Join(o.CacheDir, "blobs"), map[string]bool{dst: true}, needed, o.MinFreeBytes,
+		func() (uint64, error) { return diskguard.FreeBytes(buildDir) })
 }

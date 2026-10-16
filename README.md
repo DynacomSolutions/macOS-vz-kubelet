@@ -213,6 +213,17 @@ building; `--creds` authenticates only that destination. Credential files use th
 registry schema above, must belong to the invoking user and have mode 0600.
 No destination credentials are needed for a local import.
 
+If the import does not fit above `VZ_MIN_FREE_BYTES`, it fails with
+`insufficient free disk space`. Pass `--evict` to let it delete least-recently-used
+cached images under `<cache-dir>/blobs` first, using the downloader's eviction logic,
+and fail only if it still does not fit. Local-only images (those with a
+`.local-manifest.json`) and the destination reference are never evicted, and each
+eviction is logged with its reference directory and size. **Only use `--evict` when
+no macOS Pod is running**: the one-shot importer cannot see which cached images
+running VMs use, and VM disks are APFS clones with no link back to the cache entry,
+so no reliable in-use signal exists. Stop or drain the node first (the cluster's
+wrapper refuses while busy).
+
 The importer shares the build lock, estimates storage from the uncompressed sizes of
 non-zero chunks plus auxiliary storage, a small metadata margin, 1 GiB and
 `VZ_MIN_FREE_BYTES`, and removes temporary
