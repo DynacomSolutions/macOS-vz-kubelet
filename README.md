@@ -188,6 +188,69 @@ MacOSVK build-image --from <registry/ns/name:tag> --to <registry/ns/name:tag> \
 - `--data-disk-gib N` builds a data disk instead: a blank sparse raw disk of N GiB (at most 256) is attached to the build VM as a second writable device, the script finds it and formats it (for example `diskutil eraseDisk APFS Xcode GPT diskN`), and only that disk is pushed as a one-layer image. The recipe must leave the data disk unmountable cleanly (no open files, no process using it): before the host stop the build unmounts it over SSH (`sudo -n diskutil unmountDisk force`, on the one physical disk of exactly N GiB) and fails if that does not work. The boot clone is discarded. Size N tightly: the disk is filled, so the free-space check requires `--expected-growth-gib` plus N GiB, and the disk guard reserves the full N GiB on every node that pulls the image. Pods attach the result with the `dynacom.dev/data-disks` annotation (see Storage).
 - It refuses to run while a macOS virtual machine owned by root (the provider's) is running, or one owned by a user named with `--count-vm-user` (repeatable); Linux VMs such as Colima's are not counted, and a failure to enumerate refuses the run. It honours `VZ_MIN_FREE_BYTES` throughout, and always deletes the clone. Peak extra disk is the blocks the script changes (`--expected-growth-gib`, default 10).
 
+## Importing a Tart image
+
+`MacOSVK import-tart --local` converts a public Tart disk-v2 image directly into
+the provider's local cache, without an Apple ID or a running VM. Use `--local` for
+this workflow: it never contacts or uploads to the destination registry. `--to`
+still names the reference used by `build-image --from` and Pods.
+
+```sh
+MacOSVK import-tart --local \
+  --src ghcr.io/cirruslabs/macos-tahoe-xcode@sha256:71d9dc1d6c4614b7ecbb328753124912b43425fc8cf1c4085d7f352026df6601 \
+  --to registry.s.dynacom.dev/macos-vz/tahoe-xcode:27 \
+  --cache-dir /abs/path/provider-cache
+```
+
+Run the import as the **same user as the provider** (root for `build-image`) and
+use the same `--cache-dir` for the import and build. The default is that user's
+OS cache directory plus the provider's app identifier. A different user's cache
+will not be found, and `build-image` requires root-owned cached inputs.
+
+The source is anonymous by default; `--src-creds` authenticates a private source.
+Omitting `--local` retains registry publishing and requires a later pull before
+building; `--creds` authenticates only that destination. Credential files use the
+registry schema above, must belong to the invoking user and have mode 0600.
+No destination credentials are needed for a local import.
+
+The importer shares the build lock, checks the full logical disk size plus
+auxiliary storage, a 1 GiB margin and `VZ_MIN_FREE_BYTES`, and removes temporary
+files on success or failure. Downloads and decompression are streamed with digest
+checks; zero blocks remain sparse. The pinned image has a 140,000,000,000-byte raw
+disk. Local imports hash the same gzip representation as a push, then move the
+unpacked files on the same volume, without storing a compressed copy or copying
+the full disk again. Existing destination cache directories are refused; choose
+a fresh tag for another import.
+
+The local cache contains `disk.img`, `aux.img`, `config.json` and their verified
+`.digest` sidecars in the exact downloader reference directory under `blobs/`.
+A `.local-manifest.json` and its digest preserve the manifest, including the OCI
+config descriptor and layer descriptors. `build-image --from` automatically uses
+this manifest offline, so no extra offline flag or preliminary Pod pull is needed.
+The provider also uses it without registry access with `imagePullPolicy:
+IfNotPresent` (set that explicitly, especially for `latest`). Missing layers or
+invalid local metadata fail without registry fallback. `Always` explicitly pulls
+from the registry and clears the local marker after a successful pull.
+
+Guest access is unchanged by import. This Cirrus image uses guest user `admin`
+and password `admin`. Run the build with `VZ_SSH_USER=admin` and
+`VZ_SSH_PASSWORD=admin` in the **root build process's environment**, or use
+`VZ_SSH_PRIVATE_KEY_PATH` / `VZ_SSH_PRIVATE_KEY_BASE64` only after the matching
+public key is installed in the guest. Unset unrelated key variables when using
+the password, since an invalid configured key fails before password authentication.
+`build-image` does **not** read credentials JSON from stdin and does **not** accept
+`guest_password`: that field is for `create-base`. Its required
+`--registry-creds-file` contains only destination registry authentication.
+
+Run the recipe using `build-image --from` with the imported reference, a different
+`--to`, the same cache directory, `--script` and `--registry-creds-file`; both
+references must be allowed by `VZ_ALLOWED_IMAGE_PREFIXES`. For the Xcode data-disk
+recipe also pass `--data-disk-gib N`. The script runs as `admin` and any `sudo -n`
+commands require passwordless sudo in the guest. Booting requires compatible
+Apple Silicon hardware and host macOS. **The build result is still pushed**:
+local import only avoids uploading the large base image. Plan space for the
+recipe's result before running the build against a full registry.
+
 ## Creating a base image from an IPSW
 
 `MacOSVK create-base` (root only, never a Pod feature) installs macOS from an Apple IPSW and pushes the result as a base image, with no other tooling:

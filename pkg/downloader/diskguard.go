@@ -3,7 +3,6 @@ package downloader
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/diskguard"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 
@@ -24,10 +24,7 @@ import (
 
 // ErrInsufficientSpace is returned when a pull would leave less free space than
 // the configured floor, or when free space falls below it mid-pull.
-var ErrInsufficientSpace = errors.New("insufficient free disk space")
-
-// diskPollInterval is how often free space is checked during a pull.
-const diskPollInterval = time.Second
+var ErrInsufficientSpace = diskguard.ErrInsufficientSpace
 
 // guardMu serialises estimate + eviction so concurrent pulls do not both spend
 // the same free space. reservations (guarded by guardMu) are the pulls in flight.
@@ -88,13 +85,7 @@ type cacheEntry struct {
 }
 
 // freeBytes reports the space available to unprivileged writers on the volume holding path.
-func freeBytes(path string) (uint64, error) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, err
-	}
-	return uint64(st.Bsize) * uint64(st.Bavail), nil // nolint: gosec
-}
+func freeBytes(path string) (uint64, error) { return diskguard.FreeBytes(path) }
 
 // wantDigest is the digest the layer output must have: the uncompressed digest for a
 // compressed layer, else the layer digest. It is what the sidecar records.
@@ -110,21 +101,7 @@ func wantDigest(l ocispec.Descriptor) string {
 // rehashing) and records the expected digest, so a re-pushed tag is not taken for the
 // old content. A bare file with no sidecar is a partial from an aborted pull.
 func isCached(l ocispec.Descriptor, dir string) bool {
-	name := l.Annotations[ocispec.AnnotationTitle]
-	if name == "" {
-		return false
-	}
-	fi, err := os.Stat(filepath.Join(dir, name))
-	if err != nil {
-		return false
-	}
-	sidecar := filepath.Join(dir, name+disk.DigestFileSuffix)
-	si, err := os.Stat(sidecar)
-	if err != nil || !si.ModTime().After(fi.ModTime()) {
-		return false
-	}
-	got, err := os.ReadFile(sidecar)
-	return err == nil && string(got) == wantDigest(l)
+	return oci.IsCached(l, dir)
 }
 
 // imageLocks serialises pulls per image dir, so two pulls of the same dir never overlap
@@ -193,9 +170,7 @@ func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
 }
 
 // fits reports whether free space after writing needed bytes stays at or above floor.
-func fits(free, needed, floor uint64) bool {
-	return free >= needed && free-needed >= floor
-}
+func fits(free, needed, floor uint64) bool { return diskguard.Fits(free, needed, floor) }
 
 // selectEvictions picks cached images to delete, least recently used first, never
 // one in inUse, until needed fits above floor. ok is false if even evicting every
@@ -364,27 +339,5 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) (release f
 // watchFreeSpace cancels the returned context with ErrInsufficientSpace if free
 // space on path drops below floor. Call stop when the pull is done.
 func watchFreeSpace(ctx context.Context, path string, floor uint64) (context.Context, func()) {
-	ctx, cancel := context.WithCancelCause(ctx)
-	if floor == 0 {
-		return ctx, func() { cancel(nil) }
-	}
-	done := make(chan struct{})
-	go func() {
-		t := time.NewTicker(diskPollInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if free, err := freeBytes(path); err == nil && free < floor {
-					cancel(fmt.Errorf("%w: %d bytes free, floor %d; pull aborted", ErrInsufficientSpace, free, floor))
-					return
-				}
-			}
-		}
-	}()
-	return ctx, func() { close(done); cancel(nil) }
+	return diskguard.WatchFreeSpace(ctx, path, floor)
 }

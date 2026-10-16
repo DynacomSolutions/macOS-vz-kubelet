@@ -3,8 +3,9 @@ package downloader
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"os"
 
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -13,12 +14,7 @@ import (
 // ImageDir returns the cache directory of ref under storePath, refusing a reference that would
 // map outside <storePath>/blobs.
 func ImageDir(storePath, ref string) (string, error) {
-	blobsRoot := filepath.Join(storePath, "blobs")
-	imageDir := filepath.Join(blobsRoot, convertToPath(ref))
-	if rel, err := filepath.Rel(blobsRoot, imageDir); err != nil || !filepath.IsLocal(rel) || rel == "." {
-		return "", fmt.Errorf("image reference %q maps outside the cache", ref)
-	}
-	return imageDir, nil
+	return oci.ImageDir(storePath, ref)
 }
 
 // CachedImage is an image whose every layer is in the cache and digest-verified.
@@ -28,7 +24,8 @@ type CachedImage struct {
 	Layers         []ocispec.Descriptor
 }
 
-// VerifyCached resolves ref's manifest in the registry (the manifest only, no layers) and
+// VerifyCached uses a local import manifest when present, otherwise resolves the registry
+// manifest (no layers). It
 // requires every layer of it to be already cached and validated (isCached: the digest
 // sidecar is newer than the file and records the manifest's digest). It never pulls.
 func VerifyCached(ctx context.Context, storePath, ref string, creds resource.RegistryCredentials) (CachedImage, error) {
@@ -36,16 +33,24 @@ func VerifyCached(ctx context.Context, storePath, ref string, creds resource.Reg
 	if err != nil {
 		return CachedImage{}, err
 	}
-	desc, layers, err := fetchLayers(ctx, ref, creds)
+	m, d, err := oci.ReadLocalManifest(ctx, dir)
+	var layers []ocispec.Descriptor
+	manifestDigest := d.String()
+	if os.IsNotExist(err) {
+		desc, remoteLayers, remoteErr := fetchLayers(ctx, ref, creds)
+		err, layers, manifestDigest = remoteErr, remoteLayers, desc.Digest.String()
+	} else {
+		layers = m.Layers
+	}
 	if err != nil {
 		return CachedImage{}, err
 	}
 	for _, l := range layers {
 		if !isCached(l, dir) {
-			return CachedImage{}, fmt.Errorf("image %s is not fully cached and verified (layer %q); pull it with a Pod first", ref, l.Annotations[ocispec.AnnotationTitle])
+			return CachedImage{}, fmt.Errorf("image %s is not fully cached and verified (layer %q); import or pull it again", ref, l.Annotations[ocispec.AnnotationTitle])
 		}
 	}
-	return CachedImage{Dir: dir, ManifestDigest: desc.Digest.String(), Layers: layers}, nil
+	return CachedImage{Dir: dir, ManifestDigest: manifestDigest, Layers: layers}, nil
 }
 
 // FreeBytes reports the space available on the volume holding path.

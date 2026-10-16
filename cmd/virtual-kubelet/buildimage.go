@@ -24,7 +24,8 @@ const buildImageUsage = `usage: MacOSVK build-image --from <ref> --to <ref> --sc
 Builds a new macOS image from one already in the provider cache: boots an APFS clone of it,
 runs the script in the guest as the VZ_SSH_USER user, stops the VM from the host and streams
 the result to the registry. Must run as root. Needs VZ_ALLOWED_IMAGE_PREFIXES, VZ_SSH_USER and
-VZ_SSH_PRIVATE_KEY_PATH (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE.
+VZ_SSH_PASSWORD or VZ_SSH_PRIVATE_KEY_PATH (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE.
+Local imports are verified from their saved manifest without contacting the base registry.
 Refuses to run while a macOS virtual machine owned by root (the provider's) or by a --count-vm-user
 user is running; Linux VMs such as Colima's do not count against Apple's 2-VM cap.
 With --data-disk-gib N the result is a data disk, not a bootable image: the script finds the blank

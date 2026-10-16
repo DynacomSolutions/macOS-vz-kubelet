@@ -53,6 +53,8 @@ func ComputeAndVerifyFileDigest(filePath string, expectedDigest digest.Digest) e
 		return err
 	}
 
+	defer rd.Close()
+
 	verifier := expectedDigest.Verifier()
 	if _, err := io.Copy(verifier, rd); err != nil {
 		return err
