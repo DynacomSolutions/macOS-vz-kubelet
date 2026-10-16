@@ -13,6 +13,9 @@ import (
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/tart"
+	"github.com/sirupsen/logrus"
+	"github.com/virtual-kubelet/virtual-kubelet/log"
+	logruslogger "github.com/virtual-kubelet/virtual-kubelet/log/logrus"
 )
 
 func importTartMain(args []string) int {
@@ -22,6 +25,7 @@ func importTartMain(args []string) int {
 	to := fs.String("to", "", "destination macos-vz OCI name:tag")
 	creds := fs.String("creds", "", "destination registry credentials JSON file (optional)")
 	srcCreds := fs.String("src-creds", "", "source registry credentials JSON file (optional, separate from destination)")
+	evict := fs.Bool("evict", false, "if space is short, delete least-recently-used cached images (only when no macOS Pod is running)")
 	cache := fs.String("cache-dir", "", "absolute working cache directory (default: provider cache)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -61,7 +65,9 @@ func importTartMain(args []string) int {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local})
+	log.L = logruslogger.FromLogrus(logrus.NewEntry(logrus.New()))
+	ctx = log.WithLogger(ctx, log.L)
+	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict})
 	if err != nil {
 		return fail(err)
 	}

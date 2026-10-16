@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
@@ -61,28 +58,11 @@ func unreserved(free uint64) uint64 {
 	return free - min(free, reservedBytes())
 }
 
-// allocatedBytes sums the allocated bytes of the regular files directly in dir
-// (allocated, not logical: decompressed disks are sparse).
-func allocatedBytes(dir string) (total uint64) {
-	files, _ := os.ReadDir(dir)
-	for _, f := range files {
-		if info, err := f.Info(); err == nil && f.Type().IsRegular() {
-			if st, ok := info.Sys().(*syscall.Stat_t); ok {
-				total += uint64(st.Blocks) * 512 // nolint: gosec
-			} else {
-				total += uint64(info.Size()) // nolint: gosec
-			}
-		}
-	}
-	return total
-}
-
 // cacheEntry is one cached image directory.
-type cacheEntry struct {
-	dir      string
-	size     uint64
-	lastUsed time.Time
-}
+type cacheEntry = diskguard.CacheEntry
+
+// allocatedBytes sums the allocated bytes of the regular files directly in dir.
+func allocatedBytes(dir string) uint64 { return diskguard.AllocatedBytes(dir) }
 
 // freeBytes reports the space available to unprivileged writers on the volume holding path.
 func freeBytes(path string) (uint64, error) { return diskguard.FreeBytes(path) }
@@ -176,72 +156,14 @@ func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
 // fits reports whether free space after writing needed bytes stays at or above floor.
 func fits(free, needed, floor uint64) bool { return diskguard.Fits(free, needed, floor) }
 
-// selectEvictions picks cached images to delete, least recently used first, never
-// one in inUse, until needed fits above floor. ok is false if even evicting every
-// candidate is not enough (the caller should then evict nothing).
-func selectEvictions(entries []cacheEntry, inUse map[string]bool, free, needed, floor uint64) (evict []cacheEntry, ok bool) {
-	var cands []cacheEntry
-	for _, e := range entries {
-		if !inUse[e.dir] && !oci.HasLocalManifest(e.dir) {
-			cands = append(cands, e)
-		}
-	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].lastUsed.Before(cands[j].lastUsed) })
-	for _, e := range cands {
-		if fits(free, needed, floor) {
-			break
-		}
-		evict = append(evict, e)
-		free += e.size
-	}
-	return evict, fits(free, needed, floor)
+// selectEvictions, listCache and evictDir are shared with the one-shot importer.
+func selectEvictions(entries []cacheEntry, inUse map[string]bool, free, needed, floor uint64) ([]cacheEntry, bool) {
+	return diskguard.SelectEvictions(entries, inUse, free, needed, floor)
 }
 
-// listCache returns every image directory under root: a directory that directly
-// holds files. Image directories are leaves; nothing below one is listed.
-func listCache(root string) (entries []cacheEntry) {
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || p == root {
-			return nil
-		}
-		if oci.HasLocalManifest(p) {
-			log.G(context.Background()).Infof("Protecting local-only cached image %s from eviction", p)
-			return fs.SkipDir
-		}
-		e := cacheEntry{dir: p, size: allocatedBytes(p)}
-		if e.size == 0 {
-			return nil
-		}
-		if info, err := d.Info(); err == nil {
-			e.lastUsed = info.ModTime()
-		}
-		entries = append(entries, e)
-		return fs.SkipDir
-	})
-	return entries
-}
+func listCache(root string) []cacheEntry { return diskguard.ListCache(root) }
 
-// evictDir removes the files directly inside an image directory, then the directory
-// itself if it is now empty. It never recurses, so a nested image directory survives.
-func evictDir(dir string) error {
-	if oci.HasLocalManifest(dir) {
-		return fmt.Errorf("refusing to evict local-only image %s", dir)
-	}
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		if f.IsDir() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, f.Name())); err != nil {
-			return err
-		}
-	}
-	_ = os.Remove(dir)
-	return nil
-}
+func evictDir(dir string) error { return diskguard.EvictDir(dir) }
 
 // fetchLayers reads the image manifest and returns its layers, all with safe titles.
 // Image indexes are refused: the pull would copy every platform and the size cannot be
@@ -323,9 +245,9 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) (release f
 		}
 		logger.Infof("Disk guard for %s: need %d bytes, %d available (%d free, %d reserved), floor %d: evicting %d unused image(s)", params.Ref, needed, avail, free, reservedBytes(), params.MinFreeBytes, len(evict))
 		for _, e := range evict {
-			logger.Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space for %s", e.dir, e.size, e.lastUsed.Format(time.RFC3339), params.Ref)
-			if err := evictDir(e.dir); err != nil {
-				return nil, "", fmt.Errorf("failed to evict %s: %w", e.dir, err)
+			logger.Warnf("Evicting unused cached image %s (%d bytes, last used %s) to free space for %s", e.Dir, e.Size, e.LastUsed.Format(time.RFC3339), params.Ref)
+			if err := evictDir(e.Dir); err != nil {
+				return nil, "", fmt.Errorf("failed to evict %s: %w", e.Dir, err)
 			}
 		}
 		// Re-measure: snapshots can keep deleted blocks allocated.
