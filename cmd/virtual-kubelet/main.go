@@ -86,6 +86,9 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "import-tart" {
+		os.Exit(importTartMain(os.Args[2:]))
+	}
 	// build-image is a root-only maintenance command, not the provider: handle it before any
 	// Kubernetes client is created.
 	if len(os.Args) > 1 && os.Args[1] == "build-image" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -82,6 +83,28 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		err = errors.Join(err, store.Close(ctx))
 	}()
 
+	// Local imports deliberately have no registry copy. Never resolve their tags
+	// remotely for IfNotPresent, and never hide an incomplete local cache by pulling.
+	if !params.IgnoreExisiting {
+		m, _, localErr := oci.ReadLocalManifest(ctx, imageDir)
+		if localErr == nil {
+			for _, layer := range m.Layers {
+				if !isCached(layer, imageDir) {
+					return cfg, fmt.Errorf("image %s is not fully cached and verified", params.Ref)
+				}
+				if ok, err := store.Exists(ctx, layer); err != nil || !ok {
+					return cfg, fmt.Errorf("local layer %s is unavailable: %v", layer.Digest, err)
+				}
+			}
+			now := time.Now()
+			_ = os.Chtimes(imageDir, now, now)
+			return platformOptions(ctx, store)
+		}
+		if !os.IsNotExist(localErr) {
+			return cfg, localErr
+		}
+	}
+
 	var spaceErr error
 	err = wait.ExponentialBackoffWithContext(ctx, wait.Backoff{
 		Duration: params.MinRetryDelay, // Base delay to start with
@@ -110,6 +133,14 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 	}
 	if err != nil {
 		return cfg, err
+	}
+	// An explicit Always pull replaces any previous local-only reference.
+	if params.IgnoreExisiting {
+		for _, name := range []string{oci.LocalManifestName, oci.LocalManifestName + ".digest"} {
+			if err := os.Remove(filepath.Join(imageDir, name)); err != nil && !os.IsNotExist(err) {
+				return cfg, err
+			}
+		}
 	}
 	// Mark the image as used now, so eviction order is least recently used first.
 	now := time.Now()

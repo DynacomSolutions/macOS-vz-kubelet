@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "os": "darwin",
+  "arch": "arm64",
+  "cpuCountMin": 4,
+  "cpuCount": 4,
+  "memorySizeMin": 8589934592,
+  "memorySize": 8589934592,
+  "macAddress": "02:00:00:00:00:01",
+  "display": {"width": 1920, "height": 1080},
+  "hardwareModel": "aGFyZHdhcmUtbW9kZWw=",
+  "ecid": "bWFjaGluZS1pZGVudGlmaWVy",
+  "diskFormat": "raw"
+}

@@ -216,3 +216,29 @@ func TestLockImageSerialisesSameDir(t *testing.T) {
 	require.NoError(t, err)
 	again()
 }
+
+func TestLocalImagesSurviveEvictionAndStaleRemoval(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, "local")
+	remote := filepath.Join(root, "remote")
+	for _, dir := range []string{local, remote} {
+		require.NoError(t, os.Mkdir(dir, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "disk.img"), []byte("irreplaceable"), 0600))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(local, oci.LocalManifestName), []byte("marker"), 0600))
+	entries := listCache(root)
+	require.Len(t, entries, 1)
+	require.Equal(t, remote, entries[0].dir)
+	evictions, ok := selectEvictions([]cacheEntry{{dir: local, size: 100}, {dir: remote, size: 10}}, nil, 0, 10, 0)
+	require.True(t, ok)
+	require.Len(t, evictions, 1)
+	require.Equal(t, remote, evictions[0].dir)
+	_, ok = selectEvictions([]cacheEntry{{dir: local, size: 100}}, nil, 0, 10, 0)
+	require.False(t, ok)
+	require.Error(t, evictDir(local))
+	removeStale([]ocispec.Descriptor{{Annotations: map[string]string{ocispec.AnnotationTitle: "disk.img"}}}, local, true)
+	b, err := os.ReadFile(filepath.Join(local, "disk.img"))
+	require.NoError(t, err)
+	require.Equal(t, "irreplaceable", string(b))
+	require.FileExists(t, filepath.Join(local, oci.LocalManifestName))
+}

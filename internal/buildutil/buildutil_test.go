@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -224,6 +225,27 @@ func TestPushStreamsWithoutTempFiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, diskData, got)
 	assert.Equal(t, cfgData, reg.blobs[m.Layers[2].Digest.String()], "config.json is copied byte for byte")
+
+	// The local path must produce byte-identical descriptors and manifest, including
+	// metadata, without retaining compressed blobs or copying another raw disk.
+	cache := t.TempDir()
+	local, err := CacheLocal(context.Background(), PushOptions{
+		Ref:  host + "/macos-vz/local:v2",
+		Disk: filepath.Join(dir, "disk.img"), Aux: filepath.Join(dir, "aux.img"),
+		Config: filepath.Join(dir, "config.json"), Annotations: res.Manifest.Annotations,
+	}, cache)
+	require.NoError(t, err)
+	require.Equal(t, res.ManifestDigest, local.ManifestDigest)
+	require.Equal(t, res.Manifest, local.Manifest)
+	cachedDir, err := oci.ImageDir(cache, host+"/macos-vz/local:v2")
+	require.NoError(t, err)
+	for _, layer := range local.Manifest.Layers {
+		require.True(t, oci.IsCached(layer, cachedDir))
+	}
+	files, err := os.ReadDir(cachedDir)
+	require.NoError(t, err)
+	require.Len(t, files, 8, "three unpacked files, their digests, and manifest plus digest")
+	require.NoFileExists(t, filepath.Join(dir, "disk.img"))
 
 	// no temp file anywhere
 	left, _ := os.ReadDir(tmp)

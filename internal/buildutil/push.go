@@ -47,21 +47,23 @@ type PushResult struct {
 // needs up front, then compressed again straight into the upload. The disk must not change
 // between the two reads; the registry rejects the layer if it did.
 func Push(ctx context.Context, o PushOptions) (PushResult, error) {
+	return publish(ctx, o, "")
+}
+
+// CacheLocal consumes the private input files into the provider cache without contacting
+// the destination registry. It builds exactly the same descriptors as Push.
+func CacheLocal(ctx context.Context, o PushOptions, cacheDir string) (PushResult, error) {
+	if cacheDir == "" {
+		return PushResult{}, errors.New("local cache directory is required")
+	}
+	return publish(ctx, o, cacheDir)
+}
+
+func publish(ctx context.Context, o PushOptions, cacheDir string) (PushResult, error) {
 	if (o.Aux == "") != (o.Config == "") {
 		return PushResult{}, errors.New("aux and config must be set together: both for a bootable image, neither for a data disk")
 	}
 	dataDisk := o.Aux == ""
-	repo, err := remote.NewRepository(o.Ref)
-	if err != nil {
-		return PushResult{}, err
-	}
-	repo.PlainHTTP = isLocal(repo.Reference.Registry)
-	repo.Client = &auth.Client{
-		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
-			Username: o.Creds.Username, Password: o.Creds.Password, RefreshToken: o.Creds.IdentityToken,
-		}),
-	}
-	ctx = auth.AppendRepositoryScope(ctx, repo.Reference, auth.ActionPull, auth.ActionPush)
 	logger := log.G(ctx)
 
 	// Pass 1: digests and sizes, nothing stored.
@@ -145,6 +147,29 @@ func Push(ctx context.Context, o PushOptions) (PushResult, error) {
 		Size:      int64(len(manifestBytes)),
 	}
 
+	if cacheDir != "" {
+		paths := map[string]string{
+			oci.MediaTypeDiskImage.Title(): o.Disk,
+			oci.MediaTypeAuxImage.Title():  o.Aux,
+			oci.MediaTypeConfigV1.Title():  o.Config,
+		}
+		if err := oci.InstallLocal(ctx, cacheDir, o.Ref, manifestBytes, paths); err != nil {
+			return PushResult{}, err
+		}
+		return PushResult{ManifestDigest: manifestDesc.Digest, Manifest: manifest}, nil
+	}
+
+	repo, err := remote.NewRepository(o.Ref)
+	if err != nil {
+		return PushResult{}, err
+	}
+	repo.PlainHTTP = isLocal(repo.Reference.Registry)
+	repo.Client = &auth.Client{
+		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{
+			Username: o.Creds.Username, Password: o.Creds.Password, RefreshToken: o.Creds.IdentityToken,
+		}),
+	}
+	ctx = auth.AppendRepositoryScope(ctx, repo.Reference, auth.ActionPull, auth.ActionPush)
 	blobs := repo.Blobs()
 	// Pass 2: stream each gzip layer into the upload.
 	for _, l := range layers {
