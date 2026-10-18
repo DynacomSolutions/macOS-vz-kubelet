@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -293,7 +294,8 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 			return fmt.Errorf("failed to stop the build VM before the second boot: %w", err)
 		}
 		logger.Info("First script done; booting the guest again for the then-script")
-		if instance, err = bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil); err != nil {
+		next, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
+		if instance, err = keepOnError(instance, next, err); err != nil {
 			return err
 		}
 		if err := provision(ctx, instance.IPAddress, thenScript, o.ScriptTimeout, 0); err != nil {
@@ -307,19 +309,24 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	stopped = true
 	logger.Info("Build VM stopped from the host; pushing")
 
+	annotations := map[string]string{
+		"com.agoda.macosvz.build.ipsw-sha256":      o.IPSWSHA256,
+		"com.agoda.macosvz.build.macos-version":    image.OperatingSystemVersion().String(),
+		"com.agoda.macosvz.build.macos-build":      image.BuildVersion(),
+		"com.agoda.macosvz.build.script-sha256":    scriptSHA,
+		"com.agoda.macosvz.build.machine-identity": "created by create-base",
+		"com.agoda.macosvz.build.recovery-sip-off": strconv.FormatBool(o.RecoverySIPOff),
+	}
+	if thenScript != nil {
+		annotations["com.agoda.macosvz.build.then-script-sha256"] = sha256Hex(thenScript)
+	}
 	res, err := buildutil.Push(ctx, buildutil.PushOptions{
-		Ref:    o.To,
-		Creds:  creds.Credentials,
-		Disk:   diskPath,
-		Aux:    auxPath,
-		Config: cfgPath,
-		Annotations: map[string]string{
-			"com.agoda.macosvz.build.ipsw-sha256":      o.IPSWSHA256,
-			"com.agoda.macosvz.build.macos-version":    image.OperatingSystemVersion().String(),
-			"com.agoda.macosvz.build.macos-build":      image.BuildVersion(),
-			"com.agoda.macosvz.build.script-sha256":    scriptSHA,
-			"com.agoda.macosvz.build.machine-identity": "created by create-base",
-		},
+		Ref:         o.To,
+		Creds:       creds.Credentials,
+		Disk:        diskPath,
+		Aux:         auxPath,
+		Config:      cfgPath,
+		Annotations: annotations,
 	})
 	if err != nil {
 		return err
@@ -635,9 +642,18 @@ func verifySIPOff(ctx context.Context, ip string) error {
 		return err
 	}
 	defer client.Close()
-	const check = `/usr/bin/csrutil status | grep -q 'disabled' && /usr/bin/csrutil authenticated-root status | grep -q 'disabled'`
+	const check = `/usr/bin/csrutil status | grep -q 'status: disabled' && /usr/bin/csrutil authenticated-root status | grep -q 'status: disabled'`
 	if err := runRemote(ctx, client, check, nil, os.Stderr, time.Minute); err != nil {
 		return fmt.Errorf("SIP and authenticated-root are not both disabled after the Recovery step: %w", err)
 	}
 	return nil
+}
+
+// keepOnError returns next when err is nil and cur otherwise, so a failed reboot never leaves
+// the deferred Stop with a nil instance.
+func keepOnError[T any](cur, next T, err error) (T, error) {
+	if err != nil {
+		return cur, err
+	}
+	return next, nil
 }

@@ -24,27 +24,34 @@ package vzvnc
 - (unsigned short)port;
 @end
 
-static void *vncStart(void *vm, const char *password, int *port) {
+static void *vncStart(void *vm, const char *password) {
+	@autoreleasepool {
 	Class sec = NSClassFromString(@"_VZVNCAuthenticationSecurityConfiguration");
 	Class srv = NSClassFromString(@"_VZVNCServer");
 	if (!sec || !srv) return NULL;
 	id cfg = [[sec alloc] initWithPassword:[NSString stringWithUTF8String:password]];
 	_VZVNCServer *s = [[srv alloc] initWithPort:0 queue:dispatch_get_global_queue(0, 0) securityConfiguration:cfg];
+	[cfg release];
 	[s setVirtualMachine:(id)vm];
 	[s start];
-	*port = (int)[s port];
 	return s;
+	}
 }
+
+// The port is 0 until the server has bound; callers poll.
+static int vncPort(void *s) { return (int)[(_VZVNCServer *)s port]; }
 
 static void vncStop(void *s) { [(_VZVNCServer *)s stop]; [(id)s release]; }
 */
 import "C"
 
 import (
+	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"math/big"
 	"reflect"
+	"time"
 	"unsafe"
 
 	"github.com/Code-Hex/vz/v3"
@@ -54,7 +61,6 @@ import (
 // characters count) because the framework gives no promise to bind loopback only.
 type Server struct {
 	srv      unsafe.Pointer
-	Port     int
 	Password string
 }
 
@@ -66,7 +72,7 @@ func vmPointer(v *vz.VirtualMachine) (p unsafe.Pointer) {
 			p = nil
 		}
 	}()
-	f := reflect.ValueOf(v).Elem().FieldByName("Pointer")
+	f := reflect.ValueOf(v).Elem().FieldByName("pointer")
 	if !f.IsValid() || f.IsNil() {
 		return nil
 	}
@@ -79,19 +85,41 @@ func Start(v *vz.VirtualMachine) (*Server, error) {
 	if p == nil {
 		return nil, errors.New("vzvnc: cannot reach the VZVirtualMachine pointer (Code-Hex/vz layout changed)")
 	}
-	var raw [4]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return nil, err
+	const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	pwb := make([]byte, 8) // VNC authentication uses 8 characters
+	for i := range pwb {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return nil, err
+		}
+		pwb[i] = alphabet[n.Int64()]
 	}
-	pw := hex.EncodeToString(raw[:])
+	pw := string(pwb)
 	cpw := C.CString(pw)
 	defer C.free(unsafe.Pointer(cpw))
-	var port C.int
-	s := C.vncStart(p, cpw, &port)
+	s := C.vncStart(p, cpw)
 	if s == nil {
 		return nil, errors.New("vzvnc: _VZVNCServer is not available on this macOS")
 	}
-	return &Server{srv: s, Port: int(port), Password: pw}, nil
+	return &Server{srv: s, Password: pw}, nil
+}
+
+// WaitPort polls (every 50 ms, up to 10 s) until the server has bound a port and returns it.
+func (s *Server) WaitPort(ctx context.Context) (int, error) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if p := int(C.vncPort(s.srv)); p > 0 {
+			return p, nil
+		}
+		if time.Now().After(deadline) {
+			return 0, errors.New("vzvnc: the VNC server did not bind a port within 10s")
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // Stop stops the server.

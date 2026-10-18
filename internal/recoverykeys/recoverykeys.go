@@ -190,7 +190,11 @@ func typeText(k Keyer, text string) error {
 		if r < 0x20 || r >= 0x7f {
 			return fmt.Errorf("cannot type non-ASCII or control character %U", r)
 		}
-		if err := chord(k, []uint32{uint32(r)}); err != nil {
+		keys := []uint32{uint32(r)}
+		if (r >= 'A' && r <= 'Z') || strings.ContainsRune(`~!@#$%^&*()_+{}|:"<>?`, r) {
+			keys = []uint32{0xffe1, uint32(r)} // Shift_L, then the character
+		}
+		if err := chord(k, keys); err != nil {
 			return err
 		}
 	}

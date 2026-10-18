@@ -22,7 +22,7 @@ func TestDefaultScriptParses(t *testing.T) {
 }
 
 func TestRun(t *testing.T) {
-	steps, err := Parse("wait 1s\nkey ctrl+alt+cmd+t\ntype aZ\nsecret pw\nkey return\n")
+	steps, err := Parse("wait 1s\nkey ctrl+alt+cmd+t\ntype aZ!\nsecret pw\nkey return\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestRun(t *testing.T) {
 	if err := Run(context.Background(), r, steps, map[string]string{"pw": "x"}, sleep); err != nil {
 		t.Fatal(err)
 	}
-	want := []uint32{0xffe3, 0xffe9, 0xffeb, 't', 'a', 'Z', 'x', 0xff0d}
+	want := []uint32{0xffe3, 0xffe9, 0xffeb, 't', 'a', 0xffe1, 'Z', 0xffe1, '!', 'x', 0xff0d}
 	if len(r.ev) != len(want) {
 		t.Fatalf("got %v want %v", r.ev, want)
 	}

@@ -78,10 +78,21 @@ func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatfo
 	if err := instance.Start(ctx, vz.WithStartUpFromMacOSRecovery(true)); err != nil {
 		return err
 	}
-	time.Sleep(5 * time.Second)
-	cl, err := rfb.Dial(net.JoinHostPort("127.0.0.1", strconv.Itoa(vnc.Port)), vnc.Password)
+	port, err := vnc.WaitPort(ctx)
 	if err != nil {
 		return err
+	}
+	var cl *rfb.Client
+	for try := 0; ; try++ {
+		if cl, err = rfb.Dial(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), vnc.Password); err == nil {
+			break
+		}
+		if try == 9 {
+			return err
+		}
+		if err := recoverykeys.Sleep(ctx, 2*time.Second); err != nil {
+			return err
+		}
 	}
 	defer cl.Close()
 

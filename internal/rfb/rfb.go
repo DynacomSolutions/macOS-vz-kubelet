@@ -1,5 +1,5 @@
 // Package rfb is the smallest RFB (VNC) client that can press keys: protocol 3.8, security type
-// "None", KeyEvent messages only. create-base uses it to drive macOS Recovery through the
+// None or VNC authentication, KeyEvent messages only. create-base uses it to drive macOS Recovery through the
 // loopback-only VNC server of Virtualization.framework; the framebuffer is never read.
 package rfb
 

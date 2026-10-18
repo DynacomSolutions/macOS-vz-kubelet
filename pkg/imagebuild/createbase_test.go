@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -105,4 +106,14 @@ func TestBaseOptionsRecoveryScript(t *testing.T) {
 	steps, err := loadRecoverySteps(BaseOptions{RecoverySIPOff: true})
 	assert.NoError(t, err)
 	assert.NotEmpty(t, steps)
+}
+
+func TestKeepOnError(t *testing.T) {
+	cur, next := new(int), new(int)
+	got, err := keepOnError(cur, nil, errors.New("boot failed"))
+	assert.Error(t, err)
+	assert.Same(t, cur, got, "a failed reboot must keep the running instance")
+	got, err = keepOnError(cur, next, nil)
+	assert.NoError(t, err)
+	assert.Same(t, next, got)
 }
