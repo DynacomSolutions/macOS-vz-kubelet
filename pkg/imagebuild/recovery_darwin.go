@@ -90,7 +90,7 @@ func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatfo
 			break
 		}
 		if try == 9 {
-			return err
+			return fmt.Errorf("connecting to the VNC server on port %d failed after 10 tries: %w", port, err)
 		}
 		if err := recoverykeys.Sleep(ctx, 2*time.Second); err != nil {
 			return err

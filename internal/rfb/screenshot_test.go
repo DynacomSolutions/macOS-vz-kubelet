@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -65,9 +66,9 @@ func TestScreenshot(t *testing.T) {
 		init[4], init[5], init[7] = 32, 24, 1   // bpp, depth, true colour
 		init[23] = 2
 		sc.Write(append(init, 'h', 'i'))
-		io.ReadFull(sc, make([]byte, 20+8)) // SetPixelFormat + SetEncodings
-		io.ReadFull(sc, make([]byte, 10))   // FramebufferUpdateRequest
-		sc.Write([]byte{2})                 // a bell first
+		io.ReadFull(sc, make([]byte, 20+4+5*4)) // SetPixelFormat + SetEncodings with 5 encodings
+		io.ReadFull(sc, make([]byte, 10))       // FramebufferUpdateRequest
+		sc.Write([]byte{2})                     // a bell first
 		upd := []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 0}
 		sc.Write(append(upd, 0, 0, 255, 0, 30, 20, 10, 0))
 	}()
@@ -99,5 +100,85 @@ func TestWritePNG(t *testing.T) {
 	}
 	if WritePNG(p, image.NewRGBA(image.Rect(0, 0, 1, 1))) == nil {
 		t.Fatal("overwrote an existing screenshot")
+	}
+}
+
+func be32(v int32) []byte { return binary.BigEndian.AppendUint32(nil, uint32(v)) }
+
+// A canned server stream: a DesktopSize rect (resize to 2x1) and a Cursor rect in one update,
+// then, after the client asks again, a Raw update.
+func TestScreenshotPseudoEncodings(t *testing.T) {
+	cs, sc := net.Pipe()
+	go func() {
+		defer sc.Close()
+		sc.Write([]byte("RFB 003.008\n"))
+		io.ReadFull(sc, make([]byte, 12))
+		sc.Write([]byte{1, 1})
+		io.ReadFull(sc, make([]byte, 1))
+		sc.Write([]byte{0, 0, 0, 0})
+		io.ReadFull(sc, make([]byte, 1))
+		init := make([]byte, 24)
+		binary.BigEndian.PutUint16(init[0:], 4) // starts 4x4, the server then shrinks it
+		binary.BigEndian.PutUint16(init[2:], 4)
+		init[4], init[5], init[7] = 32, 24, 1
+		sc.Write(init)
+		enc := make([]byte, 20+4+5*4)
+		io.ReadFull(sc, enc)
+		if string(enc[24:]) != string(append(append(append(append(be32(0), be32(-223)...), be32(-308)...), be32(-239)...), be32(-224)...)) {
+			t.Errorf("SetEncodings payload %v", enc[24:])
+		}
+		io.ReadFull(sc, make([]byte, 10))
+		// update 1: DesktopSize 2x1, Cursor 3x2 (3*2*4 pixel bytes + 1*2 mask bytes)
+		u := []byte{0, 0, 0, 2}
+		u = append(u, 0, 0, 0, 0, 0, 2, 0, 1)
+		u = append(u, be32(-223)...)
+		u = append(u, 0, 0, 0, 0, 0, 3, 0, 2)
+		u = append(u, be32(-239)...)
+		u = append(u, make([]byte, 24+2)...)
+		sc.Write(u)
+		io.ReadFull(sc, make([]byte, 10)) // the client asks again, now for 2x1
+		u = []byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1}
+		u = append(u, be32(0)...)
+		u = append(u, 0, 0, 255, 0, 30, 20, 10, 0)
+		sc.Write(u)
+	}()
+	cl, err := Handshake(cs, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := cl.Screenshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := img.Bounds(); b.Dx() != 2 || b.Dy() != 1 {
+		t.Fatalf("size %v", b)
+	}
+	r, g, b, _ := img.At(0, 0).RGBA()
+	if r>>8 != 255 || g != 0 || b != 0 {
+		t.Fatalf("pixel (0,0) = %d %d %d", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestScreenshotErrorHasContext(t *testing.T) {
+	cs, sc := net.Pipe()
+	go func() {
+		defer sc.Close()
+		sc.Write([]byte("RFB 003.008\n"))
+		io.ReadFull(sc, make([]byte, 12))
+		sc.Write([]byte{1, 1})
+		io.ReadFull(sc, make([]byte, 1))
+		sc.Write([]byte{0, 0, 0, 0})
+		io.ReadFull(sc, make([]byte, 1))
+		init := make([]byte, 24)
+		init[1], init[3], init[4], init[5], init[7] = 2, 1, 32, 24, 1
+		sc.Write(init)
+		io.ReadFull(sc, make([]byte, 20+4+5*4+10))
+	}() // closes without answering
+	cl, err := Handshake(cs, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.Screenshot(); err == nil || !strings.Contains(err.Error(), "rfb screenshot (desktop 2x1") {
+		t.Fatalf("error without context: %v", err)
 	}
 }
