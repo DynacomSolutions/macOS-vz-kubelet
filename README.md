@@ -217,14 +217,15 @@ If the import does not fit above `VZ_MIN_FREE_BYTES`, it fails with
 `insufficient free disk space`. Pass `--evict` to let it delete least-recently-used
 cached images under `<cache-dir>/blobs` first, using the downloader's eviction logic,
 and fail only if it still does not fit. Local-only images (those with a
-`.local-manifest.json`) and the destination reference are never evicted, and each
-eviction is logged with its reference directory and size. Entries are evicted
+`.local-manifest.json`), the destination reference, every reference passed with the
+repeatable `--keep <ref>` flag, and any image used (pulled or started) in the last 24 hours
+are never evicted. If the remaining candidates cannot free enough space, the import fails
+before evicting anything. Each eviction is logged with its reference directory and size. Entries are evicted
 one at a time and free space is re-read after each, but APFS clones or snapshots can
-keep deleted blocks allocated, so evictions may free less than expected. **Only use `--evict` when
-no macOS Pod is running**: the one-shot importer cannot see which cached images
-running VMs use, and VM disks are APFS clones with no link back to the cache entry,
-so no reliable in-use signal exists. Stop or drain the node first (the cluster's
-wrapper refuses while busy).
+keep deleted blocks allocated, so evictions may free less than expected. **Pass `--keep` for every image a
+long-running Pod uses**: the one-shot importer cannot see which cached images
+running VMs use (the 24 hour window only covers recent starts), and VM disks are APFS clones
+with no link back to the cache entry, so no reliable in-use signal exists.
 
 The importer shares the build lock, estimates storage from the uncompressed sizes of
 non-zero chunks plus auxiliary storage, a small metadata margin, 1 GiB and

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
@@ -18,6 +19,11 @@ import (
 	logruslogger "github.com/virtual-kubelet/virtual-kubelet/log/logrus"
 )
 
+type keepFlag []string
+
+func (k *keepFlag) String() string     { return strings.Join(*k, ",") }
+func (k *keepFlag) Set(v string) error { *k = append(*k, v); return nil }
+
 func importTartMain(args []string) int {
 	fs := flag.NewFlagSet("import-tart", flag.ContinueOnError)
 	local := fs.Bool("local", false, "import into the provider cache without pushing to the destination registry")
@@ -25,7 +31,9 @@ func importTartMain(args []string) int {
 	to := fs.String("to", "", "destination macos-vz OCI name:tag")
 	creds := fs.String("creds", "", "destination registry credentials JSON file (optional)")
 	srcCreds := fs.String("src-creds", "", "source registry credentials JSON file (optional, separate from destination)")
-	evict := fs.Bool("evict", false, "if space is short, delete least-recently-used cached images (only when no macOS Pod is running)")
+	evict := fs.Bool("evict", false, "if space is short, delete least-recently-used cached images (never --keep refs or images used in the last 24h)")
+	var keep keepFlag
+	fs.Var(&keep, "keep", "image reference eviction must never delete (repeatable)")
 	cache := fs.String("cache-dir", "", "absolute working cache directory (default: provider cache)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -67,7 +75,7 @@ func importTartMain(args []string) int {
 	defer cancel()
 	log.L = logruslogger.FromLogrus(logrus.NewEntry(logrus.New()))
 	ctx = log.WithLogger(ctx, log.L)
-	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict})
+	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict, Keep: keep})
 	if err != nil {
 		return fail(err)
 	}
