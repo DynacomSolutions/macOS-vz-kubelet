@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/diskguard"
@@ -28,7 +29,13 @@ type Options struct {
 	// Evict lets the import delete least-recently-used cached images to make room. The
 	// caller must ensure no Pod uses the cache: nothing here can see running VMs.
 	Evict bool
+	// Keep lists image references that eviction must never delete.
+	Keep []string
 }
+
+// recentUse protects cached images used within this window: pulls and Pod starts
+// touch the image directory, and the one-shot importer cannot see running Pods.
+const recentUse = 24 * time.Hour
 
 // verifiedCopy bounds the read and verifies both the size and digest, including for
 // registries that do not validate blob downloads themselves.
@@ -146,7 +153,7 @@ func Run(ctx context.Context, o Options) (result buildutil.PushResult, err error
 		if !o.Evict {
 			return result, fmt.Errorf("%w: import needs %d bytes plus floor %d, available %d (--evict can remove unused cached images when no Pod is running)", diskguard.ErrInsufficientSpace, needed, o.MinFreeBytes, free)
 		}
-		if err := makeRoom(ctx, o, bd.Dir(), needed); err != nil {
+		if err := makeRoom(ctx, o, func() (uint64, error) { return diskguard.FreeBytes(bd.Dir()) }, needed); err != nil {
 			return result, err
 		}
 	}
@@ -224,13 +231,28 @@ func writeFile(path string, write func(*os.File) error) error {
 	return errors.Join(err, f.Close())
 }
 
-// makeRoom evicts least-recently-used cached images (never the destination, never a
-// local-only import) until the import fits. Free space is read from the build directory's volume.
-func makeRoom(ctx context.Context, o Options, buildDir string, needed uint64) error {
+// makeRoom evicts least-recently-used cached images until the import fits. It never
+// evicts the destination, a local-only import, a --keep reference or an image used
+// within recentUse. If the remaining candidates cannot free enough, it evicts nothing
+// and fails. free reads the build directory's volume.
+func makeRoom(ctx context.Context, o Options, free func() (uint64, error), needed uint64) error {
 	dst, err := oci.ImageDir(o.CacheDir, o.Destination)
 	if err != nil {
 		return err
 	}
-	return diskguard.MakeRoom(ctx, filepath.Join(o.CacheDir, "blobs"), map[string]bool{dst: true}, needed, o.MinFreeBytes,
-		func() (uint64, error) { return diskguard.FreeBytes(buildDir) })
+	root := filepath.Join(o.CacheDir, "blobs")
+	protected := map[string]bool{dst: true}
+	for _, ref := range o.Keep {
+		dir, err := oci.ImageDir(o.CacheDir, ref)
+		if err != nil {
+			return fmt.Errorf("invalid --keep reference %q: %w", ref, err)
+		}
+		protected[dir] = true
+	}
+	for _, e := range diskguard.ListCache(root) {
+		if time.Since(e.LastUsed) < recentUse {
+			protected[e.Dir] = true
+		}
+	}
+	return diskguard.MakeRoom(ctx, root, protected, needed, o.MinFreeBytes, free)
 }

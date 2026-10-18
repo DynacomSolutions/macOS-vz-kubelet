@@ -101,3 +101,38 @@ func TestMakeRoomLogsEviction(t *testing.T) {
 	}
 	require.True(t, found, "eviction must be logged")
 }
+
+func TestMakeRoomProtectsKeepAndRecent(t *testing.T) {
+	cache := t.TempDir()
+	mk := func(ref string, age time.Duration) string {
+		dir, err := oci.ImageDir(cache, ref)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "disk.img"), make([]byte, 1<<20), 0o600))
+		when := time.Now().Add(-age)
+		require.NoError(t, os.Chtimes(dir, when, when))
+		return dir
+	}
+	kept := mk("reg.example/img/kept:1", 72*time.Hour)
+	recent := mk("reg.example/img/recent:1", time.Hour)
+	stale := mk("reg.example/img/stale:1", 72*time.Hour)
+	exists := func(d string) bool { _, err := os.Stat(d); return err == nil }
+	free := func() (uint64, error) {
+		if exists(stale) {
+			return 0, nil
+		}
+		return 1 << 30, nil
+	}
+	o := Options{CacheDir: cache, Destination: "reg.example/img/dst:1", Keep: []string{"reg.example/img/kept:1"}}
+
+	// Only the stale image is eligible; even though more space is wanted than it can free,
+	// nothing may be evicted (fail fast).
+	err := makeRoom(context.Background(), o, free, 1<<40)
+	require.ErrorIs(t, err, diskguard.ErrInsufficientSpace)
+	require.True(t, exists(kept) && exists(recent) && exists(stale), "nothing evicted when hopeless")
+
+	require.NoError(t, makeRoom(context.Background(), o, free, 1<<20))
+	require.False(t, exists(stale))
+	require.True(t, exists(kept), "--keep image must survive")
+	require.True(t, exists(recent), "image used in the last 24h must survive")
+}
