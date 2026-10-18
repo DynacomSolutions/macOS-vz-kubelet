@@ -29,6 +29,7 @@ from the host and pushes the result. Must run as root. Needs VZ_SSH_USER=admin a
 (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE. The credentials JSON is
 {"username","password","guest_password"} (or identityToken instead of username and password).
 With --then-script the VM is stopped from the host after the script, booted again and the second script runs.
+With --pre-recovery-script (and --recovery-sip-off) the guest first boots normally and runs that script as admin (password on stdin only), then is stopped.
 With --recovery-sip-off the seeded guest is first started once in macOS Recovery, where a keystroke
 script (built in, or --recovery-script) turns off SIP and authenticated-root; the guest then boots normally.
 Refuses to run while a macOS virtual machine owned by root or a --count-vm-user user is running.
@@ -49,6 +50,7 @@ func createBaseMain(args []string) int {
 		diskGiB    = fs.Uint64("disk-gib", 80, "size of the guest disk in GiB (sparse)")
 		timeout    = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
 		thenScript = fs.String("then-script", "", "absolute path of a second script run after a host-side stop and a fresh boot (same file rules as --script)")
+		preScript  = fs.String("pre-recovery-script", "", "absolute path of a script run in a normal boot before the Recovery step (needs --recovery-sip-off); the guest password is its first stdin line")
 		recSIP     = fs.Bool("recovery-sip-off", false, "boot once into macOS Recovery and run csrutil disable and csrutil authenticated-root disable (private VNC API, blind keystrokes)")
 		recScript  = fs.String("recovery-script", "", "absolute path of a root-owned keystroke script replacing the built-in one (see internal/recoverykeys)")
 		recShots   = fs.String("recovery-shots-dir", "", "absolute directory for Recovery screenshots (a timestamped subdirectory per run, kept; default <cache-dir>/recovery-shots)")
@@ -71,7 +73,7 @@ func createBaseMain(args []string) int {
 		CPU: *cpu, MemoryBytes: *memoryGiB << 30, DiskBytes: *diskGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		ScriptTimeout:    *timeout, CountVMUsers: countUsers,
-		ThenScriptPath: *thenScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript, RecoveryShotsDir: *recShots,
+		ThenScriptPath: *thenScript, PreRecoveryScriptPath: *preScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript, RecoveryShotsDir: *recShots,
 	}
 	if err := opts.Check(); err != nil {
 		fmt.Fprintln(os.Stderr, "create-base:", err)
