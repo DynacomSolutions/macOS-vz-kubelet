@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/recoverykeys"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
@@ -94,6 +95,12 @@ type BaseOptions struct {
 	// changes the boot volume (bless --create-snapshot) needs the reboot to finish its work.
 	ThenScriptPath string
 
+	// PreRecoveryScriptPath, with RecoverySIPOff, adds a normal boot before Recovery: the guest is
+	// booted, verified, this script runs in it as admin with the guest password as the first line
+	// of its stdin (never argv or the log), and the VM is stopped; then Recovery. For work that
+	// Recovery needs done first, such as giving admin a SecureToken.
+	PreRecoveryScriptPath string
+
 	RecoverySIPOff bool
 	RecoveryScript string // optional file overriding the default script
 	// RecoveryShotsDir is the (absolute) parent of the per-run screenshot directory; default <CacheDir>/recovery-shots.
@@ -108,6 +115,9 @@ func (o BaseOptions) Check() error {
 	}
 	if o.RecoveryShotsDir != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryShotsDir)) {
 		return errors.New("--recovery-shots-dir needs --recovery-sip-off and an absolute path")
+	}
+	if o.PreRecoveryScriptPath != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.PreRecoveryScriptPath)) {
+		return errors.New("--pre-recovery-script needs --recovery-sip-off and an absolute path")
 	}
 	if o.RecoveryScript != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryScript)) {
 		return errors.New("--recovery-script needs --recovery-sip-off and an absolute path")
@@ -136,6 +146,13 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	script, err := buildutil.ReadFile(o.ScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
 	if err != nil {
 		return fmt.Errorf("script: %w", err)
+	}
+	var preScript []byte
+	if o.PreRecoveryScriptPath != "" {
+		preScript, err = buildutil.ReadFile(o.PreRecoveryScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
+		if err != nil {
+			return fmt.Errorf("pre-recovery-script: %w", err)
+		}
 	}
 	var thenScript []byte
 	if o.ThenScriptPath != "" {
@@ -265,6 +282,11 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return fmt.Errorf("failed to prepare the installed guest: %w", err)
 	}
 
+	if preScript != nil {
+		if err := runPreRecovery(ctx, o, platformOpts, preScript, creds.GuestPassword); err != nil {
+			return fmt.Errorf("pre-recovery script: %w", err)
+		}
+	}
 	if o.RecoverySIPOff {
 		if err := disableSIPInRecovery(ctx, o, platformOpts, recoverySteps, creds.GuestPassword); err != nil {
 			return fmt.Errorf("disabling SIP in macOS Recovery: %w", err)
@@ -321,6 +343,9 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		"com.agoda.macosvz.build.script-sha256":    scriptSHA,
 		"com.agoda.macosvz.build.machine-identity": "created by create-base",
 		"com.agoda.macosvz.build.recovery-sip-off": strconv.FormatBool(o.RecoverySIPOff),
+	}
+	if preScript != nil {
+		annotations["com.agoda.macosvz.build.pre-recovery-script-sha256"] = sha256Hex(preScript)
 	}
 	if thenScript != nil {
 		annotations["com.agoda.macosvz.build.then-script-sha256"] = sha256Hex(thenScript)
@@ -661,4 +686,63 @@ func keepOnError[T any](cur, next T, err error) (T, error) {
 		return cur, err
 	}
 	return next, nil
+}
+
+// buildPhases is the order of the host-side phases for the given options; RunCreateBase follows it
+// and the test pins it.
+func buildPhases(o BaseOptions) []string {
+	p := []string{"seed"}
+	if o.PreRecoveryScriptPath != "" {
+		p = append(p, "boot", "verify", "pre-recovery-script", "stop")
+	}
+	if o.RecoverySIPOff {
+		p = append(p, "recovery")
+	}
+	p = append(p, "boot", "verify")
+	if o.RecoverySIPOff {
+		p = append(p, "verify-sip-off")
+	}
+	p = append(p, "script")
+	if o.ThenScriptPath != "" {
+		p = append(p, "stop", "boot", "then-script")
+	}
+	return append(p, "stop", "push")
+}
+
+// runPreRecovery boots the seeded guest normally, verifies it, runs script as admin with the guest
+// password as the first line of stdin, and stops the VM from the host.
+func runPreRecovery(ctx context.Context, o BaseOptions, p config.MacPlatformConfigurationOptions, script []byte, guestPassword string) error {
+	logger := log.G(ctx)
+	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, p, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = instance.Stop(context.WithoutCancel(ctx)) }() // idempotent
+	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
+		return err
+	}
+	sshCfg, err := resourcemanager.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+	client, err := waitForSSH(ctx, instance.IPAddress, sshCfg, envcfg.SSHReadinessTimeout())
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if err := runRemote(ctx, client, `umask 077 && mkdir -p "$HOME/.build" && cat > "$HOME/.build/pre.sh"`, bytes.NewReader(script), nil, time.Minute); err != nil {
+		return fmt.Errorf("failed to copy the script into the guest: %w", err)
+	}
+	logger.Info("Running the pre-recovery script in the guest")
+	if err := runRemote(ctx, client, `/bin/bash "$HOME/.build/pre.sh"`, strings.NewReader(guestPassword+"\n"), os.Stderr, o.ScriptTimeout); err != nil {
+		return err
+	}
+	if err := runRemote(ctx, client, `rm -rf "$HOME/.build"; sync`, nil, os.Stderr, 5*time.Minute); err != nil {
+		return fmt.Errorf("failed to sync the guest: %w", err)
+	}
+	time.Sleep(stopGrace)
+	if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("failed to stop the build VM before Recovery: %w", err)
+	}
+	return nil
 }

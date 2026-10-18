@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -121,4 +122,20 @@ func TestKeepOnError(t *testing.T) {
 	got, err = keepOnError(cur, next, nil)
 	assert.NoError(t, err)
 	assert.Same(t, next, got)
+}
+
+func TestBuildPhases(t *testing.T) {
+	join := func(o BaseOptions) string { return strings.Join(buildPhases(o), ",") }
+	assert.Equal(t, "seed,boot,verify,script,stop,push", join(BaseOptions{}))
+	assert.Equal(t, "seed,recovery,boot,verify,verify-sip-off,script,stop,push", join(BaseOptions{RecoverySIPOff: true}))
+	assert.Equal(t, "seed,boot,verify,pre-recovery-script,stop,recovery,boot,verify,verify-sip-off,script,stop,boot,then-script,stop,push",
+		join(BaseOptions{RecoverySIPOff: true, PreRecoveryScriptPath: "/p", ThenScriptPath: "/t"}))
+
+	o := goodBaseOptions()
+	o.PreRecoveryScriptPath = "/root/pre.sh"
+	assert.Error(t, o.Check(), "pre-recovery script without --recovery-sip-off")
+	o.RecoverySIPOff = true
+	assert.NoError(t, o.Check())
+	o.PreRecoveryScriptPath = "pre.sh"
+	assert.Error(t, o.Check(), "relative path")
 }
