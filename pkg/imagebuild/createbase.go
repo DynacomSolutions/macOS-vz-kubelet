@@ -578,16 +578,46 @@ func hdiutilJSON(ctx context.Context, args ...string) ([]byte, error) {
 // guestVolumes returns the device identifiers of the Data (and System) volumes of the APFS
 // containers that live on the attached disk (for example "disk4").
 func guestVolumes(ctx context.Context, disk string) (map[string]string, error) {
-	plist, err := run(ctx, nil, "/usr/sbin/diskutil", "apfs", "list", "-plist")
-	if err != nil {
-		return nil, err
-	}
-	js, err := run(ctx, plist, "/usr/bin/plutil", "-convert", "json", "-o", "-", "-")
-	if err != nil {
-		return nil, err
-	}
-	return pickGuestVolumes(js, disk)
+	return pollGuestVolumes(ctx, disk, 2*time.Second, 60*time.Second, func() ([]byte, error) {
+		plist, err := run(ctx, nil, "/usr/sbin/diskutil", "apfs", "list", "-plist")
+		if err != nil {
+			return nil, err
+		}
+		return run(ctx, plist, "/usr/bin/plutil", "-convert", "json", "-o", "-", "-")
+	})
 }
+
+// pollGuestVolumes calls list until the attached disk shows a Data volume, every interval for up to
+// timeout: right after the install the disk image's APFS volumes may not be listed yet. Other
+// errors end the poll at once; on timeout the last listing is in the error.
+func pollGuestVolumes(ctx context.Context, disk string, interval, timeout time.Duration, list func() ([]byte, error)) (map[string]string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		js, err := list()
+		if err != nil {
+			return nil, err
+		}
+		ids, err := pickGuestVolumes(js, disk)
+		if err == nil || !errors.Is(err, errNoDataVolume) {
+			return ids, err
+		}
+		if time.Now().Add(interval).After(deadline) {
+			last := string(js)
+			if len(last) > 2000 {
+				last = last[:2000] + "..."
+			}
+			return nil, fmt.Errorf("%w (waited %s; last diskutil apfs list: %s)", err, timeout, last)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// errNoDataVolume means the disk lists no Data volume (yet).
+var errNoDataVolume = errors.New("no Data volume found")
 
 // pickGuestVolumes is the parsing half of guestVolumes (JSON converted from `diskutil apfs list -plist`).
 func pickGuestVolumes(js []byte, disk string) (map[string]string, error) {
@@ -627,7 +657,7 @@ func pickGuestVolumes(js []byte, disk string) (map[string]string, error) {
 		}
 	}
 	if ids["Data"] == "" {
-		return nil, fmt.Errorf("no Data volume found on %s", disk)
+		return nil, fmt.Errorf("%w on %s", errNoDataVolume, disk)
 	}
 	return ids, nil
 }
