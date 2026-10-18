@@ -51,6 +51,7 @@ func createBaseMain(args []string) int {
 		thenScript = fs.String("then-script", "", "absolute path of a second script run after a host-side stop and a fresh boot (same file rules as --script)")
 		recSIP     = fs.Bool("recovery-sip-off", false, "boot once into macOS Recovery and run csrutil disable and csrutil authenticated-root disable (private VNC API, blind keystrokes)")
 		recScript  = fs.String("recovery-script", "", "absolute path of a root-owned keystroke script replacing the built-in one (see internal/recoverykeys)")
+		recShots   = fs.String("recovery-shots-dir", "", "absolute directory for Recovery screenshots (a timestamped subdirectory per run, kept; default <cache-dir>/recovery-shots)")
 		logLevel   = fs.String("log-level", "info", "log level")
 	)
 	var countUsers stringList
