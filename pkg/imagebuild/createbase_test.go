@@ -103,6 +103,11 @@ func TestBaseOptionsRecoveryScript(t *testing.T) {
 	o.ThenScriptPath = "/root/then.sh"
 	assert.NoError(t, o.Check())
 
+	o.RecoveryShotsDir = "shots"
+	assert.Error(t, o.Check(), "relative shots dir")
+	o.RecoveryShotsDir = "/var/shots"
+	assert.NoError(t, o.Check())
+
 	steps, err := loadRecoverySteps(BaseOptions{RecoverySIPOff: true})
 	assert.NoError(t, err)
 	assert.NotEmpty(t, steps)

@@ -9,6 +9,7 @@ import (
 	"crypto/des"
 	"errors"
 	"fmt"
+	"image"
 	"io"
 	"math/bits"
 	"net"
@@ -17,7 +18,14 @@ import (
 
 // Client is a connected RFB session.
 type Client struct {
-	c net.Conn
+	c  net.Conn
+	r  *bufio.Reader
+	fb *image.RGBA // framebuffer kept across screenshots
+
+	// Server details from ServerInit.
+	Width, Height int
+	Name          string
+	Format        PixelFormat // the format in use (the server's until Screenshot sets ours)
 }
 
 // Handshake runs the RFB 3.8 handshake over c (shared session) and reads the ServerInit. With an
@@ -89,10 +97,13 @@ func Handshake(c net.Conn, password string) (*Client, error) {
 	if nameLen > 1<<16 {
 		return nil, errors.New("rfb: implausible desktop name length")
 	}
-	if _, err := io.CopyN(io.Discard, r, int64(nameLen)); err != nil {
+	name := make([]byte, nameLen)
+	if _, err := io.ReadFull(r, name); err != nil {
 		return nil, err
 	}
-	return &Client{c: c}, nil
+	pf := parsePixelFormat(init[4:20])
+	return &Client{c: c, r: r, Name: string(name), Format: pf,
+		Width: int(init[0])<<8 | int(init[1]), Height: int(init[2])<<8 | int(init[3])}, nil
 }
 
 // vncAuth answers a VNC authentication challenge: DES with the password's first 8 bytes as key,

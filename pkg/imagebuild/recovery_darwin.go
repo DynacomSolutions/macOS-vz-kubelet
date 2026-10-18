@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -96,10 +98,47 @@ func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatfo
 	}
 	defer cl.Close()
 
-	secrets := map[string]string{"guest_password": guestPassword}
-	if err := recoverykeys.Run(ctx, cl, steps, secrets, recoverykeys.Sleep); err != nil {
+	logger := log.G(ctx)
+	logger.Infof("RFB server %q: desktop %dx%d, pixel format %s", cl.Name, cl.Width, cl.Height, cl.Format)
+	shots, err := newShotDir(o)
+	if err != nil {
 		return err
 	}
+	snap := func(label string) {
+		img, err := cl.Screenshot()
+		if err != nil {
+			logger.WithError(err).Warnf("Recovery screenshot %s failed", label)
+			return
+		}
+		p := filepath.Join(shots, label+".png")
+		if err := rfb.WritePNG(p, img); err != nil {
+			logger.WithError(err).Warnf("Recovery screenshot %s not saved", label)
+			return
+		}
+		logger.Infof("Recovery screenshot: %s", p)
+	}
+	snap("00-connected")
+
+	secrets := map[string]string{"guest_password": guestPassword}
+	if err := recoverykeys.Run(ctx, cl, steps, secrets, recoverykeys.Sleep, snap); err != nil {
+		snap("99-failed")
+		return err
+	}
+	snap("99-before-stop")
 	log.G(ctx).Info("Recovery keystrokes done; stopping the guest")
 	return nil
+}
+
+// newShotDir creates <RecoveryShotsDir or <cache>/recovery-shots>/<UTC timestamp>, root-only. The
+// screenshots are kept after the run: they are the only record of what Recovery showed.
+func newShotDir(o BaseOptions) (string, error) {
+	base := o.RecoveryShotsDir
+	if base == "" {
+		base = filepath.Join(o.CacheDir, "recovery-shots")
+	}
+	dir := filepath.Join(base, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
