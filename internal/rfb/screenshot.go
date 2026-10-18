@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"net"
 	"os"
 	"time"
 )
@@ -110,16 +111,49 @@ func setEncodings() []byte {
 	return b
 }
 
-// Screenshot asks for a full, non-incremental framebuffer update and returns the whole
+// updateRequest encodes a FramebufferUpdateRequest for the whole w x h desktop. Screenshots use
+// incremental=false so an unchanged screen is still answered.
+func updateRequest(incremental bool, w, h int) []byte {
+	var inc byte
+	if incremental {
+		inc = 1
+	}
+	return []byte{3, inc, 0, 0, 0, 0, byte(w >> 8), byte(w), byte(h >> 8), byte(h)}
+}
+
+// Screenshot takes a screenshot; after a read timeout it reconnects once and tries again.
+func (cl *Client) Screenshot() (image.Image, error) {
+	img, err := cl.screenshot()
+	var ne net.Error
+	if err != nil && errors.As(err, &ne) && ne.Timeout() && cl.addr != "" {
+		if rerr := cl.reconnect(); rerr != nil {
+			return nil, fmt.Errorf("%w (reconnect failed: %v)", err, rerr)
+		}
+		return cl.screenshot()
+	}
+	return img, err
+}
+
+func (cl *Client) timeout() time.Duration {
+	if cl.Timeout > 0 {
+		return cl.Timeout
+	}
+	return 30 * time.Second
+}
+
+// Look is Screenshot under the name recoverykeys.Env uses.
+func (cl *Client) Look() (image.Image, error) { return cl.Screenshot() }
+
+// screenshot asks for a full, non-incremental framebuffer update and returns the whole
 // framebuffer. Raw pixels are decoded; DesktopSize, ExtendedDesktopSize, Cursor and LastRect
 // pseudo rectangles are handled or skipped. Other server messages that arrive first are skipped.
-func (cl *Client) Screenshot() (img image.Image, err error) {
+func (cl *Client) screenshot() (img image.Image, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("rfb screenshot (desktop %dx%d, %s): %w", cl.Width, cl.Height, cl.Format, err)
 		}
 	}()
-	_ = cl.c.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = cl.c.SetDeadline(time.Now().Add(cl.timeout()))
 	defer cl.c.SetDeadline(time.Time{}) //nolint:errcheck
 	if cl.fb == nil {
 		cl.fb = image.NewRGBA(image.Rect(0, 0, cl.Width, cl.Height))
@@ -130,8 +164,7 @@ func (cl *Client) Screenshot() (img image.Image, err error) {
 		cl.Format = rgb888
 	}
 	for {
-		req := []byte{3, 0, 0, 0, 0, 0, byte(cl.Width >> 8), byte(cl.Width), byte(cl.Height >> 8), byte(cl.Height)}
-		if _, err := cl.c.Write(req); err != nil {
+		if _, err := cl.c.Write(updateRequest(false, cl.Width, cl.Height)); err != nil {
 			return nil, err
 		}
 		pixels, err := cl.readUpdate()
