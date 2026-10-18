@@ -1,6 +1,7 @@
 package imagebuild
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +140,29 @@ func TestBuildPhases(t *testing.T) {
 	assert.NoError(t, o.Check())
 	o.PreRecoveryScriptPath = "pre.sh"
 	assert.Error(t, o.Check(), "relative path")
+}
+
+func TestPollGuestVolumes(t *testing.T) {
+	empty := []byte(`{"Containers":[]}`)
+	ready := []byte(`{"Containers":[{"DesignatedPhysicalStore":"disk4s2","Volumes":[{"DeviceIdentifier":"disk5s1","Roles":["Data"]}]}]}`)
+	n := 0
+	ids, err := pollGuestVolumes(context.Background(), "disk4", time.Millisecond, time.Second, func() ([]byte, error) {
+		n++
+		if n < 3 {
+			return empty, nil
+		}
+		return ready, nil
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "disk5s1", ids["Data"])
+	assert.Equal(t, 3, n)
+
+	_, err = pollGuestVolumes(context.Background(), "disk4", time.Millisecond, 20*time.Millisecond, func() ([]byte, error) { return empty, nil })
+	assert.ErrorIs(t, err, errNoDataVolume)
+	assert.Contains(t, err.Error(), `last diskutil apfs list: {"Containers":[]}`)
+
+	calls := 0
+	_, err = pollGuestVolumes(context.Background(), "disk4", time.Millisecond, time.Second, func() ([]byte, error) { calls++; return nil, errors.New("diskutil failed") })
+	assert.Error(t, err)
+	assert.Equal(t, 1, calls, "a diskutil error must not be retried")
 }
