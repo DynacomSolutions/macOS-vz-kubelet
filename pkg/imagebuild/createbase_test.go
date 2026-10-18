@@ -86,3 +86,17 @@ func TestPickGuestVolumes(t *testing.T) {
 	_, err = pickGuestVolumes(js, "disk9")
 	assert.Error(t, err)
 }
+
+func TestBaseOptionsRecoveryScript(t *testing.T) {
+	o := goodBaseOptions()
+	o.RecoveryScript = "/root/r.txt"
+	assert.Error(t, o.Check(), "script without --recovery-sip-off")
+	o.RecoverySIPOff = true
+	assert.NoError(t, o.Check())
+	o.RecoveryScript = "r.txt"
+	assert.Error(t, o.Check(), "relative script path")
+
+	steps, err := loadRecoverySteps(BaseOptions{RecoverySIPOff: true})
+	assert.NoError(t, err)
+	assert.NotEmpty(t, steps)
+}

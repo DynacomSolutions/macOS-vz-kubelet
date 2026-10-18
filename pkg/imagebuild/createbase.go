@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/recoverykeys"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resourcemanager"
@@ -82,11 +83,21 @@ type BaseOptions struct {
 	NetworkInterface string
 	ScriptTimeout    time.Duration
 	CountVMUsers     []string
+
+	// RecoverySIPOff boots the seeded guest once into macOS Recovery and plays RecoveryScript
+	// to run `csrutil disable` and `csrutil authenticated-root
+	// disable`, before the normal first boot. Keys go in through Virtualization.framework's private
+	// VNC server (see recovery_darwin.go).
+	RecoverySIPOff bool
+	RecoveryScript string // optional file overriding the default script
 }
 
 // Check validates the arguments that need no host access (CPU and memory are checked against the
 // host's limits in RunCreateBase).
 func (o BaseOptions) Check() error {
+	if o.RecoveryScript != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryScript)) {
+		return errors.New("--recovery-script needs --recovery-sip-off and an absolute path")
+	}
 	return buildutil.CheckBaseArgs(o.IPSWURL, o.IPSWSHA256, o.To, o.DiskBytes)
 }
 
@@ -121,6 +132,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return err
 	}
 	scriptSHA := sha256Hex(script)
+	var recoverySteps []recoverykeys.Step
+	if o.RecoverySIPOff {
+		if recoverySteps, err = loadRecoverySteps(o); err != nil {
+			return err
+		}
+	}
 
 	// Same rule as build-image: no macOS guest may be running, so both VM slots are free.
 	if n, err := countVMProcesses(o.CountVMUsers); err != nil {
@@ -227,6 +244,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return fmt.Errorf("failed to prepare the installed guest: %w", err)
 	}
 
+	if o.RecoverySIPOff {
+		if err := disableSIPInRecovery(ctx, o, platformOpts, recoverySteps, creds.GuestPassword); err != nil {
+			return fmt.Errorf("disabling SIP in macOS Recovery: %w", err)
+		}
+	}
+
 	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
 	if err != nil {
 		return err
@@ -240,6 +263,11 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 
 	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
 		return err
+	}
+	if o.RecoverySIPOff {
+		if err := verifySIPOff(ctx, instance.IPAddress); err != nil {
+			return err
+		}
 	}
 	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, 0); err != nil {
 		return err
@@ -564,6 +592,24 @@ n=$(sudo -n /usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db"
 [ "$n" = 2 ] || { echo "TCC grants for sshd-keygen-wrapper missing (found ${n:-none}, want 2)" >&2; exit 1; }`
 	if err := runRemote(ctx, client, verify, nil, os.Stderr, time.Minute); err != nil {
 		return fmt.Errorf("guest verification failed (passwordless sudo, admin group, key-only sshd, FileVault off, TCC grants): %w", err)
+	}
+	return nil
+}
+
+// verifySIPOff fails the build unless csrutil reports both SIP and authenticated-root disabled.
+func verifySIPOff(ctx context.Context, ip string) error {
+	sshCfg, err := resourcemanager.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+	client, err := waitForSSH(ctx, ip, sshCfg, firstBootSSHBudget)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	const check = `/usr/bin/csrutil status | grep -q 'disabled' && /usr/bin/csrutil authenticated-root status | grep -q 'disabled'`
+	if err := runRemote(ctx, client, check, nil, os.Stderr, time.Minute); err != nil {
+		return fmt.Errorf("SIP and authenticated-root are not both disabled after the Recovery step: %w", err)
 	}
 	return nil
 }

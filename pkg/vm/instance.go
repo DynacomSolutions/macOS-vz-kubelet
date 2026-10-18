@@ -27,6 +27,8 @@ type VirtualMachineInstance struct {
 	// IPLookupTimeout bounds the IP address lookup in Start; zero means IPAddressLookupTimeout.
 	// create-base raises it for the slow first boot of a freshly installed guest.
 	IPLookupTimeout time.Duration
+	// SkipIPLookup makes Start return as soon as the VM runs (macOS Recovery has no lease).
+	SkipIPLookup bool
 
 	CreatedAt  time.Time
 	StartedAt  *time.Time
@@ -117,6 +119,9 @@ func (i *VirtualMachineInstance) Start(ctx context.Context, opts ...vz.VirtualMa
 
 	if err := i.VirtualMachine.Start(opts...); err != nil {
 		return err
+	}
+	if i.SkipIPLookup {
+		return nil
 	}
 
 	lookupTimeout := IPAddressLookupTimeout
