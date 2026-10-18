@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeRaw32(t *testing.T) {
@@ -180,5 +181,92 @@ func TestScreenshotErrorHasContext(t *testing.T) {
 	}
 	if _, err := cl.Screenshot(); err == nil || !strings.Contains(err.Error(), "rfb screenshot (desktop 2x1") {
 		t.Fatalf("error without context: %v", err)
+	}
+}
+
+func TestPointerAndRequestEncoding(t *testing.T) {
+	if got := pointerEvent(0x0123, 0x0456, 1); string(got) != string([]byte{5, 1, 0x01, 0x23, 0x04, 0x56}) {
+		t.Fatalf("pointer event %v", got)
+	}
+	if got := updateRequest(false, 1920, 1200); got[0] != 3 || got[1] != 0 || binary.BigEndian.Uint16(got[6:]) != 1920 || binary.BigEndian.Uint16(got[8:]) != 1200 {
+		t.Fatalf("a screenshot request must be non-incremental and cover the desktop: %v", got)
+	}
+	if updateRequest(true, 1, 1)[1] != 1 {
+		t.Fatal("incremental flag")
+	}
+}
+
+func TestClickSendsMoveDownUp(t *testing.T) {
+	cs, sc := net.Pipe()
+	cl := &Client{c: cs, Width: 101, Height: 51}
+	got := make(chan []byte, 1)
+	go func() { b := make([]byte, 18); io.ReadFull(sc, b); got <- b }()
+	if err := cl.Click(0.5, 1); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{}
+	for _, m := range []byte{0, 1, 0} {
+		want = append(want, 5, m, 0, 50, 0, 50)
+	}
+	if b := <-got; string(b) != string(want) {
+		t.Fatalf("got %v want %v", b, want)
+	}
+	if cl.Click(1.5, 0) == nil {
+		t.Fatal("click outside the desktop accepted")
+	}
+}
+
+// serve answers one RFB client on c: handshake, then (if answer) every update request with a 1x1 Raw frame.
+func serve(c net.Conn, answer bool) {
+	defer c.Close()
+	c.Write([]byte("RFB 003.008\n"))
+	io.ReadFull(c, make([]byte, 12))
+	c.Write([]byte{1, 1})
+	io.ReadFull(c, make([]byte, 1))
+	c.Write([]byte{0, 0, 0, 0})
+	io.ReadFull(c, make([]byte, 1))
+	init := make([]byte, 24)
+	init[1], init[3], init[4], init[5], init[7] = 1, 1, 32, 24, 1
+	c.Write(init)
+	io.ReadFull(c, make([]byte, 20+4+5*4))
+	for {
+		req := make([]byte, 10)
+		if _, err := io.ReadFull(c, req); err != nil {
+			return
+		}
+		if !answer {
+			io.Copy(io.Discard, c) // never answers: the client times out
+			return
+		}
+		c.Write([]byte{0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 2, 3, 0})
+	}
+}
+
+func TestScreenshotReconnectsAfterTimeout(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for n := 0; ; n++ {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serve(c, n > 0) // the first connection is silent, the second answers
+		}
+	}()
+	cl, err := Dial(ln.Addr().String(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl.Timeout = 300 * time.Millisecond
+	img, err := cl.Screenshot()
+	if err != nil {
+		t.Fatalf("no recovery after a timeout: %v", err)
+	}
+	if r, _, _, _ := img.At(0, 0).RGBA(); r>>8 != 3 { // bytes B G R: 1 2 3 -> red 3
+		t.Fatalf("pixel red = %d", r>>8)
 	}
 }

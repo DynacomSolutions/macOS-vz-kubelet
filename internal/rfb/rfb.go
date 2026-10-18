@@ -23,6 +23,11 @@ type Client struct {
 	fb *image.RGBA // framebuffer kept across screenshots
 
 	// Server details from ServerInit.
+	addr, password string
+
+	// Timeout bounds one screenshot read (default 30 s).
+	Timeout time.Duration
+
 	Width, Height int
 	Name          string
 	Format        PixelFormat // the format in use (the server's until Screenshot sets ours)
@@ -135,7 +140,49 @@ func Dial(addr, password string) (*Client, error) {
 		_ = c.Close()
 		return nil, err
 	}
+	cl.addr, cl.password = addr, password
 	return cl, nil
+}
+
+// reconnect drops the connection and dials the same server again (only for clients made by Dial).
+// The framebuffer starts blank and the pixel format and encodings are sent again.
+func (cl *Client) reconnect() error {
+	if cl.addr == "" {
+		return errors.New("rfb: client was not made by Dial, cannot reconnect")
+	}
+	_ = cl.c.Close()
+	n, err := Dial(cl.addr, cl.password)
+	if err != nil {
+		return err
+	}
+	*cl = *n
+	return nil
+}
+
+// pointerEvent encodes a PointerEvent message (type 5): button mask, x, y.
+func pointerEvent(x, y int, buttons byte) []byte {
+	return []byte{5, buttons, byte(x >> 8), byte(x), byte(y >> 8), byte(y)}
+}
+
+// Pointer moves the pointer to (x, y) with the given button mask held (bit 0 is the left button).
+func (cl *Client) Pointer(x, y int, buttons byte) error {
+	_, err := cl.c.Write(pointerEvent(x, y, buttons))
+	return err
+}
+
+// Click moves to the point at fraction (fx, fy) of the desktop and clicks the left button.
+func (cl *Client) Click(fx, fy float64) error {
+	if fx < 0 || fx > 1 || fy < 0 || fy > 1 {
+		return fmt.Errorf("rfb: click (%v, %v) is outside 0..1", fx, fy)
+	}
+	x, y := int(fx*float64(cl.Width-1)), int(fy*float64(cl.Height-1))
+	for _, b := range []byte{0, 1, 0} {
+		if err := cl.Pointer(x, y, b); err != nil {
+			return err
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+	return nil
 }
 
 // Key sends one KeyEvent (X11 keysym).

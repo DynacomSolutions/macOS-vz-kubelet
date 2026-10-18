@@ -120,7 +120,11 @@ func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatfo
 	snap("00-connected")
 
 	secrets := map[string]string{"guest_password": guestPassword}
-	if err := recoverykeys.Run(ctx, cl, steps, secrets, recoverykeys.Sleep, snap); err != nil {
+	if err := recoverykeys.Run(ctx, cl, steps, recoverykeys.Options{
+		Secrets: secrets,
+		Snap:    snap,
+		Logf:    func(f string, a ...any) { logger.Infof("recovery: "+f, a...) },
+	}); err != nil {
 		snap("99-failed")
 		return err
 	}
