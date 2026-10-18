@@ -88,6 +88,11 @@ type BaseOptions struct {
 	// to run `csrutil disable` and `csrutil authenticated-root
 	// disable`, before the normal first boot. Keys go in through Virtualization.framework's private
 	// VNC server (see recovery_darwin.go).
+	// ThenScriptPath, when set, runs after ScriptPath in a second boot: the host stops the VM
+	// once the first script has returned, boots it again and runs this script. A recipe that
+	// changes the boot volume (bless --create-snapshot) needs the reboot to finish its work.
+	ThenScriptPath string
+
 	RecoverySIPOff bool
 	RecoveryScript string // optional file overriding the default script
 }
@@ -95,6 +100,9 @@ type BaseOptions struct {
 // Check validates the arguments that need no host access (CPU and memory are checked against the
 // host's limits in RunCreateBase).
 func (o BaseOptions) Check() error {
+	if o.ThenScriptPath != "" && !filepath.IsAbs(o.ThenScriptPath) {
+		return errors.New("--then-script must be an absolute path")
+	}
 	if o.RecoveryScript != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryScript)) {
 		return errors.New("--recovery-script needs --recovery-sip-off and an absolute path")
 	}
@@ -122,6 +130,13 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	script, err := buildutil.ReadFile(o.ScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
 	if err != nil {
 		return fmt.Errorf("script: %w", err)
+	}
+	var thenScript []byte
+	if o.ThenScriptPath != "" {
+		thenScript, err = buildutil.ReadFile(o.ThenScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
+		if err != nil {
+			return fmt.Errorf("then-script: %w", err)
+		}
 	}
 	credsRaw, err := buildutil.ReadFile(o.CredsPath, buildutil.FilePolicy{MaxSize: maxCredsSize, OwnerUID: o.OwnerUID, ForbidBit: 0o077})
 	if err != nil {
@@ -271,6 +286,19 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	}
 	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, 0); err != nil {
 		return err
+	}
+	if thenScript != nil {
+		time.Sleep(stopGrace)
+		if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
+			return fmt.Errorf("failed to stop the build VM before the second boot: %w", err)
+		}
+		logger.Info("First script done; booting the guest again for the then-script")
+		if instance, err = bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil); err != nil {
+			return err
+		}
+		if err := provision(ctx, instance.IPAddress, thenScript, o.ScriptTimeout, 0); err != nil {
+			return err
+		}
 	}
 	time.Sleep(stopGrace)
 	if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {

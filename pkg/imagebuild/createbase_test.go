@@ -96,6 +96,12 @@ func TestBaseOptionsRecoveryScript(t *testing.T) {
 	o.RecoveryScript = "r.txt"
 	assert.Error(t, o.Check(), "relative script path")
 
+	o.RecoveryScript = ""
+	o.ThenScriptPath = "then.sh"
+	assert.Error(t, o.Check(), "relative then-script")
+	o.ThenScriptPath = "/root/then.sh"
+	assert.NoError(t, o.Check())
+
 	steps, err := loadRecoverySteps(BaseOptions{RecoverySIPOff: true})
 	assert.NoError(t, err)
 	assert.NotEmpty(t, steps)

@@ -28,6 +28,7 @@ credentials JSON) with passwordless sudo and key-only sshd, runs the script in t
 from the host and pushes the result. Must run as root. Needs VZ_SSH_USER=admin and VZ_SSH_PRIVATE_KEY_PATH
 (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE. The credentials JSON is
 {"username","password","guest_password"} (or identityToken instead of username and password).
+With --then-script the VM is stopped from the host after the script, booted again and the second script runs.
 With --recovery-sip-off the seeded guest is first started once in macOS Recovery, where a keystroke
 script (built in, or --recovery-script) turns off SIP and authenticated-root; the guest then boots normally.
 Refuses to run while a macOS virtual machine owned by root or a --count-vm-user user is running.
@@ -47,6 +48,7 @@ func createBaseMain(args []string) int {
 		memoryGiB = fs.Uint64("memory-gib", 8, "memory of the VM in GiB")
 		diskGiB   = fs.Uint64("disk-gib", 80, "size of the guest disk in GiB (sparse)")
 		timeout   = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
+		thenScript = fs.String("then-script", "", "absolute path of a second script run after a host-side stop and a fresh boot (same file rules as --script)")
 		recSIP    = fs.Bool("recovery-sip-off", false, "boot once into macOS Recovery and run csrutil disable and csrutil authenticated-root disable (private VNC API, blind keystrokes)")
 		recScript = fs.String("recovery-script", "", "absolute path of a root-owned keystroke script replacing the built-in one (see internal/recoverykeys)")
 		logLevel  = fs.String("log-level", "info", "log level")
@@ -68,7 +70,7 @@ func createBaseMain(args []string) int {
 		CPU: *cpu, MemoryBytes: *memoryGiB << 30, DiskBytes: *diskGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		ScriptTimeout:    *timeout, CountVMUsers: countUsers,
-		RecoverySIPOff: *recSIP, RecoveryScript: *recScript,
+		ThenScriptPath: *thenScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript,
 	}
 	if err := opts.Check(); err != nil {
 		fmt.Fprintln(os.Stderr, "create-base:", err)
