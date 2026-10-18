@@ -96,6 +96,8 @@ type BaseOptions struct {
 
 	RecoverySIPOff bool
 	RecoveryScript string // optional file overriding the default script
+	// RecoveryShotsDir is the (absolute) parent of the per-run screenshot directory; default <CacheDir>/recovery-shots.
+	RecoveryShotsDir string
 }
 
 // Check validates the arguments that need no host access (CPU and memory are checked against the
@@ -103,6 +105,9 @@ type BaseOptions struct {
 func (o BaseOptions) Check() error {
 	if o.ThenScriptPath != "" && !filepath.IsAbs(o.ThenScriptPath) {
 		return errors.New("--then-script must be an absolute path")
+	}
+	if o.RecoveryShotsDir != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryShotsDir)) {
+		return errors.New("--recovery-shots-dir needs --recovery-sip-off and an absolute path")
 	}
 	if o.RecoveryScript != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryScript)) {
 		return errors.New("--recovery-script needs --recovery-sip-off and an absolute path")

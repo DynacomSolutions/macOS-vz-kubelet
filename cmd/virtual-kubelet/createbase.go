@@ -70,7 +70,7 @@ func createBaseMain(args []string) int {
 		CPU: *cpu, MemoryBytes: *memoryGiB << 30, DiskBytes: *diskGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		ScriptTimeout:    *timeout, CountVMUsers: countUsers,
-		ThenScriptPath: *thenScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript,
+		ThenScriptPath: *thenScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript, RecoveryShotsDir: *recShots,
 	}
 	if err := opts.Check(); err != nil {
 		fmt.Fprintln(os.Stderr, "create-base:", err)

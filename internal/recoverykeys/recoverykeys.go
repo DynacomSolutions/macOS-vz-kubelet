@@ -141,8 +141,9 @@ func Parse(script string) ([]Step, error) {
 }
 
 // Run plays steps through k. secrets maps secret names to values; a missing name is an error
-// before anything is typed. sleep is time.Sleep-like and honours ctx.
-func Run(ctx context.Context, k Keyer, steps []Step, secrets map[string]string, sleep func(context.Context, time.Duration) error) error {
+// before anything is typed. sleep is time.Sleep-like and honours ctx. snap, when not nil, is called
+// with a label such as "03-wait-30s" after every wait, key and type step (never after a secret).
+func Run(ctx context.Context, k Keyer, steps []Step, secrets map[string]string, sleep func(context.Context, time.Duration) error, snap func(label string)) error {
 	for _, s := range steps {
 		if s.Secret != "" {
 			if _, ok := secrets[s.Secret]; !ok {
@@ -150,20 +151,27 @@ func Run(ctx context.Context, k Keyer, steps []Step, secrets map[string]string, 
 			}
 		}
 	}
-	for _, s := range steps {
+	for i, s := range steps {
 		var err error
+		label := ""
 		switch {
 		case s.Wait > 0:
 			err = sleep(ctx, s.Wait)
+			label = "wait-" + s.Wait.String()
 		case len(s.Keys) > 0:
 			err = chord(k, s.Keys)
+			label = "key"
 		case s.Text != "":
 			err = typeText(k, s.Text)
+			label = "type"
 		case s.Secret != "":
 			err = typeText(k, secrets[s.Secret])
 		}
 		if err != nil {
 			return err
+		}
+		if snap != nil && label != "" {
+			snap(fmt.Sprintf("%02d-%s", i+1, label))
 		}
 	}
 	return nil
