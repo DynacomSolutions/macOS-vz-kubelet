@@ -37,11 +37,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/buildutil"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/recoverykeys"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/oci"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resourcemanager"
@@ -82,11 +84,29 @@ type BaseOptions struct {
 	NetworkInterface string
 	ScriptTimeout    time.Duration
 	CountVMUsers     []string
+
+	// RecoverySIPOff boots the seeded guest once into macOS Recovery and plays RecoveryScript
+	// to run `csrutil disable` and `csrutil authenticated-root
+	// disable`, before the normal first boot. Keys go in through Virtualization.framework's private
+	// VNC server (see recovery_darwin.go).
+	// ThenScriptPath, when set, runs after ScriptPath in a second boot: the host stops the VM
+	// once the first script has returned, boots it again and runs this script. A recipe that
+	// changes the boot volume (bless --create-snapshot) needs the reboot to finish its work.
+	ThenScriptPath string
+
+	RecoverySIPOff bool
+	RecoveryScript string // optional file overriding the default script
 }
 
 // Check validates the arguments that need no host access (CPU and memory are checked against the
 // host's limits in RunCreateBase).
 func (o BaseOptions) Check() error {
+	if o.ThenScriptPath != "" && !filepath.IsAbs(o.ThenScriptPath) {
+		return errors.New("--then-script must be an absolute path")
+	}
+	if o.RecoveryScript != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryScript)) {
+		return errors.New("--recovery-script needs --recovery-sip-off and an absolute path")
+	}
 	return buildutil.CheckBaseArgs(o.IPSWURL, o.IPSWSHA256, o.To, o.DiskBytes)
 }
 
@@ -112,6 +132,13 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	if err != nil {
 		return fmt.Errorf("script: %w", err)
 	}
+	var thenScript []byte
+	if o.ThenScriptPath != "" {
+		thenScript, err = buildutil.ReadFile(o.ThenScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
+		if err != nil {
+			return fmt.Errorf("then-script: %w", err)
+		}
+	}
 	credsRaw, err := buildutil.ReadFile(o.CredsPath, buildutil.FilePolicy{MaxSize: maxCredsSize, OwnerUID: o.OwnerUID, ForbidBit: 0o077})
 	if err != nil {
 		return fmt.Errorf("credentials file: %w", err)
@@ -121,6 +148,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return err
 	}
 	scriptSHA := sha256Hex(script)
+	var recoverySteps []recoverykeys.Step
+	if o.RecoverySIPOff {
+		if recoverySteps, err = loadRecoverySteps(o); err != nil {
+			return err
+		}
+	}
 
 	// Same rule as build-image: no macOS guest may be running, so both VM slots are free.
 	if n, err := countVMProcesses(o.CountVMUsers); err != nil {
@@ -227,6 +260,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		return fmt.Errorf("failed to prepare the installed guest: %w", err)
 	}
 
+	if o.RecoverySIPOff {
+		if err := disableSIPInRecovery(ctx, o, platformOpts, recoverySteps, creds.GuestPassword); err != nil {
+			return fmt.Errorf("disabling SIP in macOS Recovery: %w", err)
+		}
+	}
+
 	instance, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
 	if err != nil {
 		return err
@@ -241,8 +280,27 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	if err := verifyGuest(ctx, instance.IPAddress); err != nil {
 		return err
 	}
+	if o.RecoverySIPOff {
+		if err := verifySIPOff(ctx, instance.IPAddress); err != nil {
+			return err
+		}
+	}
 	if err := provision(ctx, instance.IPAddress, script, o.ScriptTimeout, 0); err != nil {
 		return err
+	}
+	if thenScript != nil {
+		time.Sleep(stopGrace)
+		if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
+			return fmt.Errorf("failed to stop the build VM before the second boot: %w", err)
+		}
+		logger.Info("First script done; booting the guest again for the then-script")
+		next, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
+		if instance, err = keepOnError(instance, next, err); err != nil {
+			return err
+		}
+		if err := provision(ctx, instance.IPAddress, thenScript, o.ScriptTimeout, 0); err != nil {
+			return err
+		}
 	}
 	time.Sleep(stopGrace)
 	if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
@@ -251,19 +309,24 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	stopped = true
 	logger.Info("Build VM stopped from the host; pushing")
 
+	annotations := map[string]string{
+		"com.agoda.macosvz.build.ipsw-sha256":      o.IPSWSHA256,
+		"com.agoda.macosvz.build.macos-version":    image.OperatingSystemVersion().String(),
+		"com.agoda.macosvz.build.macos-build":      image.BuildVersion(),
+		"com.agoda.macosvz.build.script-sha256":    scriptSHA,
+		"com.agoda.macosvz.build.machine-identity": "created by create-base",
+		"com.agoda.macosvz.build.recovery-sip-off": strconv.FormatBool(o.RecoverySIPOff),
+	}
+	if thenScript != nil {
+		annotations["com.agoda.macosvz.build.then-script-sha256"] = sha256Hex(thenScript)
+	}
 	res, err := buildutil.Push(ctx, buildutil.PushOptions{
-		Ref:    o.To,
-		Creds:  creds.Credentials,
-		Disk:   diskPath,
-		Aux:    auxPath,
-		Config: cfgPath,
-		Annotations: map[string]string{
-			"com.agoda.macosvz.build.ipsw-sha256":      o.IPSWSHA256,
-			"com.agoda.macosvz.build.macos-version":    image.OperatingSystemVersion().String(),
-			"com.agoda.macosvz.build.macos-build":      image.BuildVersion(),
-			"com.agoda.macosvz.build.script-sha256":    scriptSHA,
-			"com.agoda.macosvz.build.machine-identity": "created by create-base",
-		},
+		Ref:         o.To,
+		Creds:       creds.Credentials,
+		Disk:        diskPath,
+		Aux:         auxPath,
+		Config:      cfgPath,
+		Annotations: annotations,
 	})
 	if err != nil {
 		return err
@@ -566,4 +629,31 @@ n=$(sudo -n /usr/bin/sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db"
 		return fmt.Errorf("guest verification failed (passwordless sudo, admin group, key-only sshd, FileVault off, TCC grants): %w", err)
 	}
 	return nil
+}
+
+// verifySIPOff fails the build unless csrutil reports both SIP and authenticated-root disabled.
+func verifySIPOff(ctx context.Context, ip string) error {
+	sshCfg, err := resourcemanager.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+	client, err := waitForSSH(ctx, ip, sshCfg, firstBootSSHBudget)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	const check = `/usr/bin/csrutil status | grep -q 'status: disabled' && /usr/bin/csrutil authenticated-root status | grep -q 'status: disabled'`
+	if err := runRemote(ctx, client, check, nil, os.Stderr, time.Minute); err != nil {
+		return fmt.Errorf("SIP and authenticated-root are not both disabled after the Recovery step: %w", err)
+	}
+	return nil
+}
+
+// keepOnError returns next when err is nil and cur otherwise, so a failed reboot never leaves
+// the deferred Stop with a nil instance.
+func keepOnError[T any](cur, next T, err error) (T, error) {
+	if err != nil {
+		return cur, err
+	}
+	return next, nil
 }

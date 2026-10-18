@@ -28,6 +28,9 @@ credentials JSON) with passwordless sudo and key-only sshd, runs the script in t
 from the host and pushes the result. Must run as root. Needs VZ_SSH_USER=admin and VZ_SSH_PRIVATE_KEY_PATH
 (or _BASE64); honours VZ_MIN_FREE_BYTES and VZ_BRIDGE_INTERFACE. The credentials JSON is
 {"username","password","guest_password"} (or identityToken instead of username and password).
+With --then-script the VM is stopped from the host after the script, booted again and the second script runs.
+With --recovery-sip-off the seeded guest is first started once in macOS Recovery, where a keystroke
+script (built in, or --recovery-script) turns off SIP and authenticated-root; the guest then boots normally.
 Refuses to run while a macOS virtual machine owned by root or a --count-vm-user user is running.
 `
 
@@ -35,17 +38,20 @@ Refuses to run while a macOS virtual machine owned by root or a --count-vm-user 
 func createBaseMain(args []string) int {
 	fs := flag.NewFlagSet("create-base", flag.ContinueOnError)
 	var (
-		ipswURL   = fs.String("ipsw-url", "", "HTTPS URL of the Apple IPSW")
-		ipswSHA   = fs.String("ipsw-sha256", "", "expected SHA-256 of the IPSW (64 lower-case hex digits)")
-		to        = fs.String("to", "", "image reference to push, under "+buildutil.BaseRefPrefix)
-		script    = fs.String("script", "", "absolute path of the provisioning script (root-owned, not group/other writable)")
-		creds     = fs.String("creds", "", "absolute path of a root-only (0600) JSON file with username, password and guest_password")
-		cacheDir  = fs.String("cache-dir", "", "provider cache directory (default: the provider's)")
-		cpu       = fs.Uint("cpu", 4, "virtual CPUs of the VM")
-		memoryGiB = fs.Uint64("memory-gib", 8, "memory of the VM in GiB")
-		diskGiB   = fs.Uint64("disk-gib", 80, "size of the guest disk in GiB (sparse)")
-		timeout   = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
-		logLevel  = fs.String("log-level", "info", "log level")
+		ipswURL    = fs.String("ipsw-url", "", "HTTPS URL of the Apple IPSW")
+		ipswSHA    = fs.String("ipsw-sha256", "", "expected SHA-256 of the IPSW (64 lower-case hex digits)")
+		to         = fs.String("to", "", "image reference to push, under "+buildutil.BaseRefPrefix)
+		script     = fs.String("script", "", "absolute path of the provisioning script (root-owned, not group/other writable)")
+		creds      = fs.String("creds", "", "absolute path of a root-only (0600) JSON file with username, password and guest_password")
+		cacheDir   = fs.String("cache-dir", "", "provider cache directory (default: the provider's)")
+		cpu        = fs.Uint("cpu", 4, "virtual CPUs of the VM")
+		memoryGiB  = fs.Uint64("memory-gib", 8, "memory of the VM in GiB")
+		diskGiB    = fs.Uint64("disk-gib", 80, "size of the guest disk in GiB (sparse)")
+		timeout    = fs.Duration("script-timeout", 3*time.Hour, "maximum run time of the script")
+		thenScript = fs.String("then-script", "", "absolute path of a second script run after a host-side stop and a fresh boot (same file rules as --script)")
+		recSIP     = fs.Bool("recovery-sip-off", false, "boot once into macOS Recovery and run csrutil disable and csrutil authenticated-root disable (private VNC API, blind keystrokes)")
+		recScript  = fs.String("recovery-script", "", "absolute path of a root-owned keystroke script replacing the built-in one (see internal/recoverykeys)")
+		logLevel   = fs.String("log-level", "info", "log level")
 	)
 	var countUsers stringList
 	fs.Var(&countUsers, "count-vm-user", "also count this user's Virtualization VMs as running macOS guests (repeatable)")
@@ -64,6 +70,7 @@ func createBaseMain(args []string) int {
 		CPU: *cpu, MemoryBytes: *memoryGiB << 30, DiskBytes: *diskGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		ScriptTimeout:    *timeout, CountVMUsers: countUsers,
+		ThenScriptPath: *thenScript, RecoverySIPOff: *recSIP, RecoveryScript: *recScript,
 	}
 	if err := opts.Check(); err != nil {
 		fmt.Fprintln(os.Stderr, "create-base:", err)

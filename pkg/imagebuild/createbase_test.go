@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,4 +86,34 @@ func TestPickGuestVolumes(t *testing.T) {
 	assert.Equal(t, map[string]string{"System": "disk5s1", "Data": "disk5s2"}, ids)
 	_, err = pickGuestVolumes(js, "disk9")
 	assert.Error(t, err)
+}
+
+func TestBaseOptionsRecoveryScript(t *testing.T) {
+	o := goodBaseOptions()
+	o.RecoveryScript = "/root/r.txt"
+	assert.Error(t, o.Check(), "script without --recovery-sip-off")
+	o.RecoverySIPOff = true
+	assert.NoError(t, o.Check())
+	o.RecoveryScript = "r.txt"
+	assert.Error(t, o.Check(), "relative script path")
+
+	o.RecoveryScript = ""
+	o.ThenScriptPath = "then.sh"
+	assert.Error(t, o.Check(), "relative then-script")
+	o.ThenScriptPath = "/root/then.sh"
+	assert.NoError(t, o.Check())
+
+	steps, err := loadRecoverySteps(BaseOptions{RecoverySIPOff: true})
+	assert.NoError(t, err)
+	assert.NotEmpty(t, steps)
+}
+
+func TestKeepOnError(t *testing.T) {
+	cur, next := new(int), new(int)
+	got, err := keepOnError(cur, nil, errors.New("boot failed"))
+	assert.Error(t, err)
+	assert.Same(t, cur, got, "a failed reboot must keep the running instance")
+	got, err = keepOnError(cur, next, nil)
+	assert.NoError(t, err)
+	assert.Same(t, next, got)
 }
