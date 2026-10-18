@@ -23,6 +23,10 @@ func TestVMPointer(t *testing.T) {
 	if err != nil {
 		t.Skipf("no configuration: %v", err)
 	}
+	// An invalid configuration raises an Objective-C exception that kills the test binary: check first.
+	if ok, verr := cfg.Validate(); verr != nil || !ok {
+		t.Skipf("configuration is not valid on this host: %v", verr)
+	}
 	machine, err := vz.NewVirtualMachine(cfg)
 	if err != nil {
 		t.Skipf("no virtual machine: %v", err)
