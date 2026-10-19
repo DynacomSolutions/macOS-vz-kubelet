@@ -41,18 +41,22 @@ import (
 
 // loadRecoverySteps parses --recovery-script, or the built-in script.
 func loadRecoverySteps(o BaseOptions) ([]recoverykeys.Step, error) {
-	text := recoverykeys.DefaultScript
-	if o.RecoveryScript != "" {
-		b, err := buildutil.ReadFile(o.RecoveryScript, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
-		if err != nil {
-			return nil, fmt.Errorf("recovery script: %w", err)
-		}
-		text = string(b)
+	if o.RecoveryScript == "" {
+		return recoverykeys.Parse(recoverykeys.DefaultScript)
 	}
-	return recoverykeys.Parse(text)
+	return loadStepsFile(o.RecoveryScript, o.OwnerUID)
 }
 
-// disableSIPInRecovery starts the guest in macOS Recovery, plays steps and force-stops the VM
+// loadStepsFile reads a root-owned, not group/other writable recoverykeys script.
+func loadStepsFile(path string, ownerUID uint32) ([]recoverykeys.Step, error) {
+	b, err := buildutil.ReadFile(path, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: ownerUID, ForbidBit: 0o022})
+	if err != nil {
+		return nil, err
+	}
+	return recoverykeys.Parse(string(b))
+}
+
+// disableSIPInRecovery (also used for the second Recovery pass) starts the guest in macOS Recovery, plays steps and force-stops the VM
 // from the host (a guest-initiated shutdown would leak a VM slot, see vm.handleStateChanges).
 func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatformConfigurationOptions, steps []recoverykeys.Step, guestPassword string) (err error) {
 	platform, err := config.NewPlatformConfiguration(ctx, p, false, "create-base")

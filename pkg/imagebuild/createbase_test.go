@@ -166,3 +166,19 @@ func TestPollGuestVolumes(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, 1, calls, "a diskutil error must not be retried")
 }
+
+func TestPostScriptRecoveryWiring(t *testing.T) {
+	join := func(o BaseOptions) string { return strings.Join(buildPhases(o), ",") }
+	assert.Equal(t, "seed,recovery,boot,verify,verify-sip-off,script,stop,recovery-post,boot,then-script,stop,push",
+		join(BaseOptions{RecoverySIPOff: true, ThenScriptPath: "/t", PostScriptRecoveryPath: "/p"}))
+	assert.Equal(t, "seed,recovery,boot,verify,verify-sip-off,script,stop,boot,then-script,stop,push",
+		join(BaseOptions{RecoverySIPOff: true, ThenScriptPath: "/t"}))
+
+	o := goodBaseOptions()
+	o.PostScriptRecoveryPath = "/root/post.recovery"
+	assert.Error(t, o.Check(), "needs --then-script")
+	o.ThenScriptPath = "/root/then.sh"
+	assert.NoError(t, o.Check())
+	o.PostScriptRecoveryPath = "post.recovery"
+	assert.Error(t, o.Check(), "relative path")
+}
