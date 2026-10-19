@@ -94,6 +94,11 @@ type BaseOptions struct {
 	// once the first script has returned, boots it again and runs this script. A recipe that
 	// changes the boot volume (bless --create-snapshot) needs the reboot to finish its work.
 	ThenScriptPath string
+	// PostScriptRecoveryPath, with ThenScriptPath, adds a second Recovery pass between the host stop
+	// that follows the first script and the second boot: the file is a recoverykeys script like
+	// RecoveryScript. For work only Recovery can do after the first script, such as deleting the
+	// old root snapshot once a new one has been blessed.
+	PostScriptRecoveryPath string
 
 	// PreRecoveryScriptPath, with RecoverySIPOff, adds a normal boot before Recovery: the guest is
 	// booted, verified, this script runs in it as admin with the guest password as the first line
@@ -112,6 +117,9 @@ type BaseOptions struct {
 func (o BaseOptions) Check() error {
 	if o.ThenScriptPath != "" && !filepath.IsAbs(o.ThenScriptPath) {
 		return errors.New("--then-script must be an absolute path")
+	}
+	if o.PostScriptRecoveryPath != "" && (o.ThenScriptPath == "" || !filepath.IsAbs(o.PostScriptRecoveryPath)) {
+		return errors.New("--post-script-recovery-script needs --then-script and an absolute path")
 	}
 	if o.RecoveryShotsDir != "" && (!o.RecoverySIPOff || !filepath.IsAbs(o.RecoveryShotsDir)) {
 		return errors.New("--recovery-shots-dir needs --recovery-sip-off and an absolute path")
@@ -152,6 +160,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		preScript, err = buildutil.ReadFile(o.PreRecoveryScriptPath, buildutil.FilePolicy{MaxSize: maxScriptSize, OwnerUID: o.OwnerUID, ForbidBit: 0o022})
 		if err != nil {
 			return fmt.Errorf("pre-recovery-script: %w", err)
+		}
+	}
+	var postSteps []recoverykeys.Step
+	if o.PostScriptRecoveryPath != "" {
+		if postSteps, err = loadStepsFile(o.PostScriptRecoveryPath, o.OwnerUID); err != nil {
+			return fmt.Errorf("post-script recovery script: %w", err)
 		}
 	}
 	var thenScript []byte
@@ -320,6 +334,12 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 		if err := instance.Stop(context.WithoutCancel(ctx)); err != nil {
 			return fmt.Errorf("failed to stop the build VM before the second boot: %w", err)
 		}
+		if postSteps != nil {
+			logger.Info("First script done; second Recovery pass")
+			if err := disableSIPInRecovery(ctx, o, platformOpts, postSteps, creds.GuestPassword); err != nil {
+				return fmt.Errorf("second Recovery pass: %w", err)
+			}
+		}
 		logger.Info("First script done; booting the guest again for the then-script")
 		next, err := bootClone(ctx, Options{CPU: o.CPU, MemoryBytes: o.MemoryBytes, NetworkInterface: o.NetworkInterface, IPLookupTimeout: firstBootIPBudget}, platformOpts, nil)
 		if instance, err = keepOnError(instance, next, err); err != nil {
@@ -346,6 +366,9 @@ func RunCreateBase(ctx context.Context, o BaseOptions) (err error) {
 	}
 	if preScript != nil {
 		annotations["com.agoda.macosvz.build.pre-recovery-script-sha256"] = sha256Hex(preScript)
+	}
+	if o.PostScriptRecoveryPath != "" {
+		annotations["com.agoda.macosvz.build.post-script-recovery"] = "true"
 	}
 	if thenScript != nil {
 		annotations["com.agoda.macosvz.build.then-script-sha256"] = sha256Hex(thenScript)
@@ -734,7 +757,11 @@ func buildPhases(o BaseOptions) []string {
 	}
 	p = append(p, "script")
 	if o.ThenScriptPath != "" {
-		p = append(p, "stop", "boot", "then-script")
+		p = append(p, "stop")
+		if o.PostScriptRecoveryPath != "" {
+			p = append(p, "recovery-post")
+		}
+		p = append(p, "boot", "then-script")
 	}
 	return append(p, "stop", "push")
 }
