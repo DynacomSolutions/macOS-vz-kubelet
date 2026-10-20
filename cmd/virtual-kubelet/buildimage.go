@@ -51,6 +51,8 @@ func buildImageMain(args []string) int {
 		logLevel  = fs.String("log-level", "info", "log level")
 	)
 	var countUsers stringList
+	var attach stringList
+	fs.Var(&attach, "attach-data-disk", "attach this already pulled data disk image (name:tag) read-only to the build VM (repeatable, at most 3); its size must differ from --data-disk-gib")
 	fs.Var(&countUsers, "count-vm-user", "also count this user's Virtualization VMs as running macOS guests (repeatable), for example a user running tart")
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, buildImageUsage); fs.PrintDefaults() }
@@ -107,6 +109,7 @@ func buildImageMain(args []string) int {
 		MemoryBytes:      *memoryGiB << 30,
 		NetworkInterface: os.Getenv("VZ_BRIDGE_INTERFACE"),
 		DataDiskGiB:      *dataGiB,
+		AttachDisks:      attach,
 		ScriptTimeout:    *timeout,
 		CountVMUsers:     countUsers,
 	})
