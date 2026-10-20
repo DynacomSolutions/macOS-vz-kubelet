@@ -140,6 +140,18 @@ func TestRunRefusals(t *testing.T) {
 		assert.ErrorContains(t, Run(context.Background(), o), "--data-disk-gib")
 	})
 
+	t.Run("attached disk not allowed", func(t *testing.T) {
+		o := testOptions(t)
+		o.AttachDisks = []string{"registry.example.com/other/disk:1"}
+		assert.ErrorContains(t, Run(context.Background(), o), "--attach-data-disk")
+	})
+
+	t.Run("too many attached disks", func(t *testing.T) {
+		o := testOptions(t)
+		o.AttachDisks = []string{"a:1", "b:1", "c:1", "d:1"}
+		assert.ErrorContains(t, Run(context.Background(), o), "at most 3")
+	})
+
 	t.Run("script writable by others", func(t *testing.T) {
 		o := testOptions(t)
 		require.NoError(t, os.Chmod(o.ScriptPath, 0o666))

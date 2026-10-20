@@ -64,6 +64,11 @@ type Options struct {
 	// formats and fills it, and only that disk is pushed.
 	DataDiskGiB uint64
 
+	// AttachDisks are cached data disk images (name:tag, already pulled by the provider) attached
+	// read-only to the build VM, so a recipe can read them (for example to copy files from an
+	// existing Xcode disk onto the new one). Each must be a disk-only image under an allowed prefix.
+	AttachDisks []string
+
 	CPU              uint
 	MemoryBytes      uint64
 	NetworkInterface string
@@ -97,6 +102,14 @@ func Run(ctx context.Context, o Options) (err error) {
 		return err
 	}
 
+	if len(o.AttachDisks) > 3 {
+		return fmt.Errorf("at most 3 disks can be attached with --attach-data-disk")
+	}
+	for _, ref := range o.AttachDisks {
+		if err := buildutil.CheckRefs(ref, o.To, o.Prefixes, envcfg.ImageAllowed); err != nil {
+			return fmt.Errorf("--attach-data-disk: %w", err)
+		}
+	}
 	if o.DataDiskGiB > maxDataDiskGiB {
 		return fmt.Errorf("--data-disk-gib %d is above the maximum of %d", o.DataDiskGiB, maxDataDiskGiB)
 	}
@@ -175,6 +188,23 @@ func Run(ctx context.Context, o Options) (err error) {
 	}
 
 	var disks []config.Disk
+	for _, ref := range o.AttachDisks {
+		d, err := downloader.VerifyCached(ctx, o.CacheDir, ref, resource.RegistryCredentials{
+			Username: creds.Username, Password: creds.Password, IdentityToken: creds.IdentityToken,
+		})
+		if err != nil {
+			return fmt.Errorf("attached disk %s must be pulled first (run a Pod with it): %w", ref, err)
+		}
+		src := filepath.Join(d.Dir, "disk.img")
+		fi, err := os.Lstat(src)
+		if err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("attached disk %s: cached disk.img is missing or not a regular file", ref)
+		}
+		if _, err := os.Lstat(filepath.Join(d.Dir, "aux.img")); err == nil {
+			return fmt.Errorf("attached disk %s is a bootable image, not a data disk", ref)
+		}
+		disks = append(disks, config.Disk{Path: src, ReadOnly: true})
+	}
 	dataPath := ""
 	if o.DataDiskGiB > 0 {
 		dataPath, _ = bd.Path("data.img")
