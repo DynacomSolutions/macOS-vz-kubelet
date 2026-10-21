@@ -131,6 +131,20 @@ func requiredBytes(layers []ocispec.Descriptor, workingDir string, ignoreExistin
 	return total
 }
 
+// sharedByVMs reports whether more than one VM (this pull's requester is one) uses dir.
+func sharedByVMs(params Params, dir string) bool {
+	if params.VMUse == nil {
+		return false
+	}
+	n := 0
+	for _, d := range params.VMUse() {
+		if d == dir {
+			n++
+		}
+	}
+	return n > 1
+}
+
 // removeStale deletes outputs (and leftover .partial-* files) of layers about to be
 // pulled: they are invalid or being replaced, and would otherwise hold disk twice.
 func removeStale(layers []ocispec.Descriptor, dir string, ignoreExisting bool) {
@@ -213,7 +227,9 @@ func ensureSpace(ctx context.Context, params Params, imageDir string) (release f
 	if err != nil {
 		return nil, "", err
 	}
-	removeStale(layers, imageDir, params.IgnoreExisiting)
+	if !sharedByVMs(params, imageDir) {
+		removeStale(layers, imageDir, params.IgnoreExisiting)
+	}
 	needed := requiredBytes(layers, imageDir, params.IgnoreExisiting)
 	root := filepath.Join(params.StorePath, "blobs")
 	if err := os.MkdirAll(root, os.ModePerm); err != nil {
