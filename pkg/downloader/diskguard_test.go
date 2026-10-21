@@ -242,3 +242,10 @@ func TestLocalImagesSurviveEvictionAndStaleRemoval(t *testing.T) {
 	require.Equal(t, "irreplaceable", string(b))
 	require.FileExists(t, filepath.Join(local, oci.LocalManifestName))
 }
+
+func TestSharedByVMs(t *testing.T) {
+	use := func(d ...string) Params { return Params{VMUse: func() []string { return d }} }
+	require.False(t, sharedByVMs(Params{}, "a"))
+	require.False(t, sharedByVMs(use("a", "b"), "a"))
+	require.True(t, sharedByVMs(use("a", "b", "a"), "a"))
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"time"
 
@@ -464,6 +465,11 @@ func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, ui
 
 	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, disks)
 	if err != nil {
+		// Nothing owns the overlay clones yet, so remove them here.
+		if platformConfig.IsOverlay {
+			_ = os.Remove(platformConfig.BlockStoragePath)
+			_ = os.Remove(platformConfig.AuxiliaryStoragePath)
+		}
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}
 

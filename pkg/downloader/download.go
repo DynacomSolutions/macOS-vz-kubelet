@@ -42,6 +42,10 @@ type Params struct {
 	// InUse returns the cached image directories that must never be evicted; called
 	// under the guard lock so it is current at decision time.
 	InUse func() []string
+	// VMUse returns the cached image directories of every VM on the node, one entry per VM.
+	// An image shared by more than one VM keeps its files on a re-pull: another VM may have
+	// pulled it and not yet opened the disk.
+	VMUse func() []string
 
 	MinRetryDelay time.Duration
 	MaxDelay      time.Duration

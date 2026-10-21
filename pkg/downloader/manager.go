@@ -62,6 +62,17 @@ func (m *Manager) SetInUse(f func() []string) { m.inUse = f }
 // InUseDirs returns the cache directories that must not be evicted right now.
 func (m *Manager) InUseDirs() []string { return m.inUseDirs() }
 
+// vmDirs returns the cache directory of every VM's image and data disks, one entry per reference.
+func (m *Manager) vmDirs() (dirs []string) {
+	if m.inUse == nil {
+		return nil
+	}
+	for _, r := range m.inUse() {
+		dirs = append(dirs, filepath.Join(m.cachePath, "blobs", convertToPath(r)))
+	}
+	return dirs
+}
+
 // inUseDirs returns the cache directories of every ref in use or being downloaded.
 func (m *Manager) inUseDirs() (dirs []string) { // called under the guard lock, so current at decision time
 	var refs []string
@@ -184,6 +195,7 @@ func (m *Manager) startDownload(ctx context.Context, state *state, ref string, i
 		Credentials:     creds,
 		MinFreeBytes:    m.minFreeBytes,
 		InUse:           m.inUseDirs,
+		VMUse:           m.vmDirs,
 	}, m.eventRecorder)
 
 	state.duration = time.Since(startTime)
