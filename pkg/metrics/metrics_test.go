@@ -248,7 +248,7 @@ func (f fakeHost) NodeStats() (stats.NodeStats, error) { return f.ns, f.err }
 func TestNodeStatsInSummaryAndResourceMetrics(t *testing.T) {
 	cum, ws := uint64(90_000_000_000), uint64(4096)
 	at := metav1.NewTime(time.Unix(1_700_000_000, 0))
-	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewMockVzClientInterface(t))
+	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewVzClientInterface(t))
 	p.SetHostStats(fakeHost{ns: stats.NodeStats{
 		CPU:    &stats.CPUStats{Time: at, UsageCoreNanoSeconds: &cum},
 		Memory: &stats.MemoryStats{Time: at, WorkingSetBytes: &ws},
@@ -278,7 +278,7 @@ func TestNodeStatsInSummaryAndResourceMetrics(t *testing.T) {
 }
 
 func TestHostStatsErrorLeavesNodeBlockEmpty(t *testing.T) {
-	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewMockVzClientInterface(t))
+	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewVzClientInterface(t))
 	p.SetHostStats(fakeHost{err: errors.New("boom")})
 
 	summary, err := p.GetStatsSummary(context.Background())
