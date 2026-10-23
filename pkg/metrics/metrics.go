@@ -2,12 +2,14 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/hoststats"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/metrics/collectors"
 
 	"github.com/virtual-kubelet/virtual-kubelet/log"
@@ -29,11 +31,19 @@ type MacOSVZPodMetricsProvider struct {
 	podLister corev1listers.PodLister
 	vzClient  client.VzClientInterface
 
+	// hostStats reads the macOS host CPU and memory for the node block of the summary.
+	hostStats HostStatsReader
+
 	// failingPods is the set of pods whose stats scrape is currently failing, for
 	// edge-triggered skip logging (log on state change, not every scrape). Keyed by
 	// UID so same-name recreation is a distinct pod. Guarded by metricsSync, but only
 	// ever touched in the post-Wait single-threaded section, never by the g.Go closures.
 	failingPods map[types.UID]struct{}
+}
+
+// HostStatsReader reads host-level CPU and memory as kubelet NodeStats (NodeName unset).
+type HostStatsReader interface {
+	NodeStats() (stats.NodeStats, error)
 }
 
 // NewMacOSVZPodMetricsProvider creates a new MacOSVZPodMetricsProvider
@@ -42,8 +52,16 @@ func NewMacOSVZPodMetricsProvider(nodeName string, podLister corev1listers.PodLi
 		nodeName:    nodeName,
 		podLister:   podLister,
 		vzClient:    vzClient,
+		hostStats:   hoststats.New(),
 		failingPods: make(map[types.UID]struct{}),
 	}
+}
+
+// SetHostStats replaces the host stats reader; nil disables node cpu and memory.
+func (p *MacOSVZPodMetricsProvider) SetHostStats(r HostStatsReader) {
+	p.metricsSync.Lock()
+	defer p.metricsSync.Unlock()
+	p.hostStats = r
 }
 
 // podStat is the single self-describing outcome slot per pod index, carrying the pod
@@ -152,9 +170,18 @@ func (p *MacOSVZPodMetricsProvider) GetStatsSummary(ctx context.Context) (summar
 	}
 
 	var s stats.Summary
-	s.Node = stats.NodeStats{
-		NodeName: p.nodeName,
+	if p.hostStats != nil {
+		node, hostErr := p.hostStats.NodeStats()
+		if errors.Is(hostErr, hoststats.ErrUnsupported) {
+			// Non-darwin build (dev/test only): no host block, nothing to warn about.
+		} else if hostErr != nil {
+			// Pod metrics still go out; the node block stays empty.
+			log.G(ctx).WithError(hostErr).Warn("failed to read host stats")
+		} else {
+			s.Node = node
+		}
 	}
+	s.Node.NodeName = p.nodeName
 
 	// Edge-triggered skip logging, single-threaded under metricsSync: log on the
 	// rising (newly failing) and falling (recovered) edges only. Rebuild the set from
