@@ -237,3 +237,53 @@ func TestGetStatsSummaryEdgeTriggeredSkipLogging(t *testing.T) {
 	assert.Equal(t, 1, rec.count(slog.LevelInfo, "recovered"), "falling edge logs recovery once")
 	assert.Equal(t, 1, rec.count(slog.LevelWarn, "failing"), "recovery scrape adds no new failing log")
 }
+
+type fakeHost struct {
+	ns  stats.NodeStats
+	err error
+}
+
+func (f fakeHost) NodeStats() (stats.NodeStats, error) { return f.ns, f.err }
+
+func TestNodeStatsInSummaryAndResourceMetrics(t *testing.T) {
+	cum, ws := uint64(90_000_000_000), uint64(4096)
+	at := metav1.NewTime(time.Unix(1_700_000_000, 0))
+	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewVzClientInterface(t))
+	p.SetHostStats(fakeHost{ns: stats.NodeStats{
+		CPU:    &stats.CPUStats{Time: at, UsageCoreNanoSeconds: &cum},
+		Memory: &stats.MemoryStats{Time: at, WorkingSetBytes: &ws},
+	}})
+
+	summary, err := p.GetStatsSummary(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "test-node", summary.Node.NodeName)
+	assert.Equal(t, cum, *summary.Node.CPU.UsageCoreNanoSeconds)
+
+	mf, err := p.GetMetricsResource(context.Background())
+	require.NoError(t, err)
+	got := map[string]float64{}
+	for _, f := range mf {
+		m := f.GetMetric()[0]
+		if f.GetName() == "node_cpu_usage_seconds_total" {
+			got[f.GetName()] = m.GetCounter().GetValue()
+			assert.Equal(t, int64(1_700_000_000_000), m.GetTimestampMs())
+		} else {
+			got[f.GetName()] = m.GetGauge().GetValue()
+		}
+	}
+	assert.Equal(t, 90.0, got["node_cpu_usage_seconds_total"])
+	assert.Equal(t, 4096.0, got["node_memory_working_set_bytes"])
+	assert.Contains(t, got, "resource_scrape_error")
+	assert.Contains(t, got, "scrape_error")
+}
+
+func TestHostStatsErrorLeavesNodeBlockEmpty(t *testing.T) {
+	p := metrics.NewMacOSVZPodMetricsProvider("test-node", podListerWith(t), mocks.NewVzClientInterface(t))
+	p.SetHostStats(fakeHost{err: errors.New("boom")})
+
+	summary, err := p.GetStatsSummary(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "test-node", summary.Node.NodeName)
+	assert.Nil(t, summary.Node.CPU)
+	assert.Nil(t, summary.Node.Memory)
+}
