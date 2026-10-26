@@ -32,6 +32,8 @@ func importTartMain(args []string) int {
 	creds := fs.String("creds", "", "destination registry credentials JSON file (optional)")
 	srcCreds := fs.String("src-creds", "", "source registry credentials JSON file (optional, separate from destination)")
 	evict := fs.Bool("evict", false, "if space is short, delete least-recently-used cached images (never --keep refs or images used in the last 24h)")
+	ignoreRecent := fs.Bool("evict-ignore-recent", false, "with --evict, also delete images used in the last 24h (never --keep refs; only when no VM runs)")
+	freeTargetGiB := fs.Uint64("free-target-gib", 0, "with --evict, evict until at least this many GiB are free before downloading (the size estimate can be low); fails with nothing evicted if impossible")
 	var keep keepFlag
 	fs.Var(&keep, "keep", "image reference eviction must never delete (repeatable)")
 	cache := fs.String("cache-dir", "", "absolute working cache directory (default: provider cache)")
@@ -75,7 +77,7 @@ func importTartMain(args []string) int {
 	defer cancel()
 	log.L = logruslogger.FromLogrus(logrus.NewEntry(logrus.New()))
 	ctx = log.WithLogger(ctx, log.L)
-	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict, Keep: keep})
+	result, err := tart.Run(ctx, tart.Options{Source: *src, Destination: *to, CacheDir: *cache, SourceCredentials: sourceAuth, DestinationCredentials: destAuth, MinFreeBytes: envcfg.MinFreeBytes(), Local: *local, Evict: *evict, Keep: keep, IgnoreRecent: *ignoreRecent, FreeTargetBytes: *freeTargetGiB << 30})
 	if err != nil {
 		return fail(err)
 	}

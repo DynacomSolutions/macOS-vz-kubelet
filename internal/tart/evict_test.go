@@ -136,3 +136,32 @@ func TestMakeRoomProtectsKeepAndRecent(t *testing.T) {
 	require.True(t, exists(kept), "--keep image must survive")
 	require.True(t, exists(recent), "image used in the last 24h must survive")
 }
+
+func TestMakeRoomIgnoreRecentStillProtectsKeep(t *testing.T) {
+	cache := t.TempDir()
+	mk := func(ref string, age time.Duration) string {
+		dir, err := oci.ImageDir(cache, ref)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "disk.img"), make([]byte, 1<<20), 0o600))
+		when := time.Now().Add(-age)
+		require.NoError(t, os.Chtimes(dir, when, when))
+		return dir
+	}
+	kept := mk("reg.example/img/kept:1", time.Hour)
+	recent := mk("reg.example/img/recent:1", time.Hour)
+	exists := func(d string) bool { _, err := os.Stat(d); return err == nil }
+	free := func() (uint64, error) {
+		if exists(recent) {
+			return 0, nil
+		}
+		return 1 << 30, nil
+	}
+	o := Options{CacheDir: cache, Destination: "reg.example/img/dst:1", Keep: []string{"reg.example/img/kept:1"}}
+	require.ErrorIs(t, makeRoom(context.Background(), o, free, 1<<20), diskguard.ErrInsufficientSpace)
+	require.True(t, exists(recent), "recent image survives without IgnoreRecent")
+	o.IgnoreRecent = true
+	require.NoError(t, makeRoom(context.Background(), o, free, 1<<20))
+	require.False(t, exists(recent), "IgnoreRecent evicts a recently used image")
+	require.True(t, exists(kept), "--keep image must survive IgnoreRecent")
+}
