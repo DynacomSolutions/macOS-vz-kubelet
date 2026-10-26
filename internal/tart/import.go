@@ -31,6 +31,12 @@ type Options struct {
 	Evict bool
 	// Keep lists image references that eviction must never delete.
 	Keep []string
+	// IgnoreRecent lets eviction also delete images used within recentUse (never --keep refs, the destination or
+	// local-only imports). The caller must ensure no VM runs: the importer cannot see them.
+	IgnoreRecent bool
+	// FreeTargetBytes, when above MinFreeBytes, makes the import evict (needs Evict) until at least this much is
+	// free before it downloads, because requiredSpace counts only non-zero chunks and has been seen to underestimate.
+	FreeTargetBytes uint64
 }
 
 // recentUse protects cached images used within this window: pulls and Pod starts
@@ -149,6 +155,9 @@ func Run(ctx context.Context, o Options) (result buildutil.PushResult, err error
 	if err != nil {
 		return result, err
 	}
+	if o.FreeTargetBytes > o.MinFreeBytes && o.FreeTargetBytes-o.MinFreeBytes > needed {
+		needed = o.FreeTargetBytes - o.MinFreeBytes
+	}
 	if !diskguard.Fits(free, needed, o.MinFreeBytes) {
 		if !o.Evict {
 			return result, fmt.Errorf("%w: import needs %d bytes plus floor %d, available %d (--evict can remove unused cached images when no Pod is running)", diskguard.ErrInsufficientSpace, needed, o.MinFreeBytes, free)
@@ -232,7 +241,7 @@ func writeFile(path string, write func(*os.File) error) error {
 }
 
 // makeRoom evicts least-recently-used cached images until the import fits. It never
-// evicts the destination, a local-only import, a --keep reference or an image used
+// evicts the destination, a local-only import, a --keep reference or, unless IgnoreRecent, an image used
 // within recentUse. If the remaining candidates cannot free enough, it evicts nothing
 // and fails. free reads the build directory's volume.
 func makeRoom(ctx context.Context, o Options, free func() (uint64, error), needed uint64) error {
@@ -250,7 +259,7 @@ func makeRoom(ctx context.Context, o Options, free func() (uint64, error), neede
 		protected[dir] = true
 	}
 	for _, e := range diskguard.ListCache(root) {
-		if time.Since(e.LastUsed) < recentUse {
+		if !o.IgnoreRecent && time.Since(e.LastUsed) < recentUse {
 			protected[e.Dir] = true
 		}
 	}
