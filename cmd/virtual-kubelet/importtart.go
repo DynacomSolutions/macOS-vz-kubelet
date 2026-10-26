@@ -34,6 +34,7 @@ func importTartMain(args []string) int {
 	evict := fs.Bool("evict", false, "if space is short, delete least-recently-used cached images (never --keep refs or images used in the last 24h)")
 	ignoreRecent := fs.Bool("evict-ignore-recent", false, "with --evict, also delete images used in the last 24h (never --keep refs; only when no VM runs)")
 	freeTargetGiB := fs.Uint64("free-target-gib", 0, "with --evict, evict until at least this many GiB are free before downloading (the size estimate can be low); fails with nothing evicted if impossible")
+	removeOnly := fs.Bool("remove-only", false, "delete the local-only import named by --to from the cache and exit (nothing is downloaded; only when no VM runs)")
 	var keep keepFlag
 	fs.Var(&keep, "keep", "image reference eviction must never delete (repeatable)")
 	cache := fs.String("cache-dir", "", "absolute working cache directory (default: provider cache)")
@@ -43,7 +44,7 @@ func importTartMain(args []string) int {
 		}
 		return 2
 	}
-	if *src == "" || *to == "" || fs.NArg() != 0 {
+	if *to == "" || fs.NArg() != 0 || (*src == "" && !*removeOnly) {
 		fs.Usage()
 		return 2
 	}
@@ -72,6 +73,13 @@ func importTartMain(args []string) int {
 			return fail(err)
 		}
 		*cache = filepath.Join(base, appIdentifier)
+	}
+	if *removeOnly {
+		if err := tart.RemoveLocal(*cache, *to); err != nil {
+			return fail(err)
+		}
+		fmt.Fprintf(os.Stdout, "Removed %s\n", *to)
+		return 0
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
