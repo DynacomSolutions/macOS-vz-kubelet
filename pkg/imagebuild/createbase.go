@@ -421,7 +421,7 @@ func installMacOS(ctx context.Context, o BaseOptions, p config.MacPlatformConfig
 	if err != nil {
 		return fmt.Errorf("failed to create platform configuration: %w", err)
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, nil)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, nil, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}

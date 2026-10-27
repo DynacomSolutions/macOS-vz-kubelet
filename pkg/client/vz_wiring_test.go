@@ -320,6 +320,44 @@ func TestCreateVirtualizationGroup_RejectsInvalidDataDisks(t *testing.T) {
 	assert.Empty(t, fake.createdWith)
 }
 
+func TestCreateVirtualizationGroup_RejectsInvalidDisplays(t *testing.T) {
+	t.Setenv("VZ_ALLOWED_IMAGE_PREFIXES", "registry.example.com/macos-vz/")
+	ctx := context.Background()
+	er := eventmocks.NewEventRecorder(t) // no events expected: nothing may be pulled
+	fake := &fakeContainersClient{}
+	c := client.NewVzClientAPIs(ctx, er, "", t.TempDir(), t.TempDir(), nil)
+	c.ContainerClient = fake
+	creds := resource.NewRegistryCredentialStore(nil)
+
+	const img = "registry.example.com/macos-vz/base:1"
+	for name, tc := range map[string]struct {
+		displays string
+		want     string
+	}{
+		"empty":     {displays: "", want: "empty"},
+		"bad token": {displays: "nope", want: "invalid display"},
+		"range":     {displays: "100x100", want: "out of range"},
+		"five":      {displays: "640x640,800x800,1024x768,1280x800,1920x1080", want: "maximum is 4"},
+	} {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "p", Namespace: "default", UID: "uid-1",
+				Annotations: map[string]string{resource.DisplaysAnnotation: tc.displays},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "macos", Image: img, Resources: validMacOSResources()},
+			}},
+		}
+		err := c.CreateVirtualizationGroup(ctx, pod, "", nil, nil, creds)
+		assert.True(t, errdefs.IsInvalidInput(err), "%s: want InvalidInput, got %v", name, err)
+		assert.ErrorContains(t, err, tc.want, name)
+		assert.ErrorContains(t, err, resource.DisplaysAnnotation, name)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.createdWith)
+}
+
 // A valid annotation reaches the macOS client: it announces every data disk pull, in order,
 // right after the image's.
 func TestCreateVirtualizationGroup_PassesDataDisksToTheMacOSClient(t *testing.T) {

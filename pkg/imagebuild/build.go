@@ -325,7 +325,7 @@ func bootClone(ctx context.Context, o Options, cfg config.MacPlatformConfigurati
 	if err != nil {
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, disks)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, disks, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine configuration: %w", err)
 	}

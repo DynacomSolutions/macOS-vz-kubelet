@@ -54,6 +54,11 @@ type VirtualMachineParams struct {
 	RegistryCreds    resource.RegistryCredentials
 	// DataDisks are attached read-only after the boot disk, in order (see resource.DataDisksAnnotation).
 	DataDisks []DataDisk
+	// Displays is the Mac graphics display list. The first entry is the main display.
+	// Nil means the default single 1920x1200 at 80 ppi display. A Pod whose
+	// dynacom.dev/displays annotation is present but invalid must not reach here:
+	// the caller returns the parser error instead of substituting the default.
+	Displays []resource.Display
 }
 
 // DataDisk is a data disk image to pull and attach.
@@ -335,7 +340,7 @@ func (c *MacOSClient) finalizeVirtualMachineInfo(ctx context.Context, params Vir
 
 // createVirtualMachineInstance creates a new virtual machine instance with the specified parameters.
 func (c *MacOSClient) createVirtualMachineInstance(ctx context.Context, cfg config.MacPlatformConfigurationOptions, disks []config.Disk, params VirtualMachineParams) (*vm.VirtualMachineInstance, error) {
-	vm, err := setupVM(ctx, cfg, params.UID, params.CPU, params.MemorySize, c.networkInterfaceIdentifier, params.Mounts, disks)
+	vm, err := setupVM(ctx, cfg, params.UID, params.CPU, params.MemorySize, c.networkInterfaceIdentifier, params.Mounts, disks, params.Displays)
 	if err != nil {
 		c.eventRecorder.FailedToCreateContainer(ctx, params.ContainerName, err)
 		return nil, err
@@ -456,14 +461,14 @@ func (c *MacOSClient) getVirtualMachineInfo(ctx context.Context, namespace, name
 }
 
 // setupVM creates a new virtual machine instance with the given parameters.
-func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, uid string, cpu uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []config.Disk) (*vm.VirtualMachineInstance, error) {
-	log.G(ctx).Debugf("Creating virtual machine with CPU: %d, memory: %d, network interface: %s, mounts: %+v", cpu, memorySize, networkInterfaceIdentifier, mounts)
+func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, uid string, cpu uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []config.Disk, displays []resource.Display) (*vm.VirtualMachineInstance, error) {
+	log.G(ctx).Debugf("Creating virtual machine with CPU: %d, memory: %d, network interface: %s, mounts: %+v, displays: %+v", cpu, memorySize, networkInterfaceIdentifier, mounts, displays)
 	platformConfig, err := config.NewPlatformConfiguration(ctx, cfg, true, uid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create platform configuration: %w", err)
 	}
 
-	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, disks)
+	vmConfig, err := config.NewVirtualMachineConfiguration(ctx, platformConfig, cpu, memorySize, networkInterfaceIdentifier, mounts, disks, graphicsDisplays(displays))
 	if err != nil {
 		// Nothing owns the overlay clones yet, so remove them here.
 		if platformConfig.IsOverlay {
@@ -479,4 +484,17 @@ func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, ui
 	}
 
 	return vmInstance, nil
+}
+
+// graphicsDisplays converts the parser's display list into the VM config type.
+// An empty list stays empty so the config applies the default display.
+func graphicsDisplays(in []resource.Display) []config.GraphicsDisplay {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]config.GraphicsDisplay, len(in))
+	for i, d := range in {
+		out[i] = config.GraphicsDisplay{Width: d.Width, Height: d.Height, PPI: d.PPI}
+	}
+	return out
 }
