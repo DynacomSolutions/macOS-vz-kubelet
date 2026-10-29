@@ -328,6 +328,14 @@ SSH readiness check succeeds (the guest sshd must answer), bounded by `VZ_SSH_RE
 defines an exec postStart hook, Ready is gated on that hook finishing successfully (bounded by
 `VZ_POSTSTART_TIMEOUT`); a permanently unreachable VM fails the pod rather than hanging.
 
+### Displays
+
+The pod annotation `dynacom.dev/displays` sets the displays attached to the macOS VM. The value is a comma-separated list of `WIDTHxHEIGHT`, with an optional `@PPI`. Examples: `1920x1200,1920x1080` and `1920x1200@80,1920x1080@80`. The first entry is the main display.
+
+When the annotation is missing the VM has one display, 1920x1200 at 80 ppi. PPI defaults to 80 when `@PPI` is left out. Each of width and height is an integer from 640 to 7680, PPI is an integer from 50 to 300, and there are at most 4 displays. The same size may be repeated, so two identical monitors (`1920x1080,1920x1080`) are valid. An empty annotation, an empty entry, or any other bad token fails pod creation. The error names the annotation. An invalid value is not replaced with the default display.
+
+The framebuffer size is fixed at boot. Changing the display topology requires a new Pod.
+
 ### Storage
 
 | Feature                  | Supported | Comments                                   |

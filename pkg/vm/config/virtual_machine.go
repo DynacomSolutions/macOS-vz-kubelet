@@ -33,8 +33,28 @@ type Disk struct {
 	ReadOnly bool
 }
 
+// GraphicsDisplay is one display on the Mac graphics device. Width and Height
+// are pixels. PPI is pixels per inch. The first entry is the main display.
+// A nil or empty slice selects the single default display, 1920x1200 at 80 ppi
+// (resource.DefaultDisplayWidth, DefaultDisplayHeight and DefaultDisplayPPI).
+// Image builds pass nil so they keep that display. A Pod with an invalid
+// dynacom.dev/displays annotation must not be turned into nil: the caller
+// returns the parser error instead.
+type GraphicsDisplay struct {
+	Width  int64
+	Height int64
+	PPI    int64
+}
+
+// defaultDisplay is resource.DefaultDisplay(): 1920x1200 at 80 ppi.
+const (
+	defaultDisplayWidth  int64 = 1920
+	defaultDisplayHeight int64 = 1200
+	defaultDisplayPPI    int64 = 80
+)
+
 // NewVirtualMachineConfiguration initializes a new virtual machine configuration with provided settings.
-func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []Disk) (p *VirtualMachineConfiguration, err error) {
+func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string, mounts []volumes.Mount, disks []Disk, displays []GraphicsDisplay) (p *VirtualMachineConfiguration, err error) {
 	ctx, span := trace.StartSpan(ctx, "vm.NewVirtualMachineConfiguration")
 	defer func() {
 		span.SetStatus(err)
@@ -64,7 +84,7 @@ func NewVirtualMachineConfiguration(ctx context.Context, platformConfig *Platfor
 	}
 
 	// Attach device configurations
-	if err = attachDeviceConfigurations(ctx, config, platformConfig, networkInterfaceIdentifier, macAddr, disks); err != nil {
+	if err = attachDeviceConfigurations(ctx, config, platformConfig, networkInterfaceIdentifier, macAddr, disks, displays); err != nil {
 		return nil, fmt.Errorf("failed to attach device configurations: %w", err)
 	}
 
@@ -103,7 +123,7 @@ func (c *VirtualMachineConfiguration) GetOverlays() (overlayBlockStoragePath str
 }
 
 // attachDeviceConfigurations encapsulates various device and configuration attachments to the VM.
-func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineConfiguration, platformConfig *PlatformConfiguration, networkInterfaceIdentifier string, mac net.HardwareAddr, disks []Disk) (err error) {
+func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineConfiguration, platformConfig *PlatformConfiguration, networkInterfaceIdentifier string, mac net.HardwareAddr, disks []Disk, displays []GraphicsDisplay) (err error) {
 	_, span := trace.StartSpan(ctx, "vm.attachDeviceConfigurations")
 	defer func() {
 		span.SetStatus(err)
@@ -114,7 +134,7 @@ func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineCo
 	config.SetPlatformVirtualMachineConfiguration(platformConfig)
 
 	// Create a graphics device configuration
-	graphicsDeviceConfig, err := createGraphicsDeviceConfiguration()
+	graphicsDeviceConfig, err := createGraphicsDeviceConfiguration(displays)
 	if err != nil {
 		return fmt.Errorf("failed to create graphics device configuration: %w", err)
 	}
@@ -198,18 +218,29 @@ func attachDeviceConfigurations(ctx context.Context, config *vz.VirtualMachineCo
 
 // createGraphicsDeviceConfiguration creates a new graphics device configuration.
 // While we run VM headless, we still need to create a graphics device configuration to support VNC.
-func createGraphicsDeviceConfiguration() (*vz.MacGraphicsDeviceConfiguration, error) {
+// displays is in Pod order: the first entry is the main display. A nil or empty
+// list is the single default display. The framebuffer size is fixed at boot.
+func createGraphicsDeviceConfiguration(displays []GraphicsDisplay) (*vz.MacGraphicsDeviceConfiguration, error) {
 	graphicDeviceConfig, err := vz.NewMacGraphicsDeviceConfiguration()
 	if err != nil {
 		return nil, err
 	}
-	graphicsDisplayConfig, err := vz.NewMacGraphicsDisplayConfiguration(1920, 1200, 80)
-	if err != nil {
-		return nil, err
+	if len(displays) == 0 {
+		displays = []GraphicsDisplay{{
+			Width:  defaultDisplayWidth,
+			Height: defaultDisplayHeight,
+			PPI:    defaultDisplayPPI,
+		}}
 	}
-	graphicDeviceConfig.SetDisplays(
-		graphicsDisplayConfig,
-	)
+	configs := make([]*vz.MacGraphicsDisplayConfiguration, len(displays))
+	for i, d := range displays {
+		cfg, err := vz.NewMacGraphicsDisplayConfiguration(d.Width, d.Height, d.PPI)
+		if err != nil {
+			return nil, fmt.Errorf("display %d (%dx%d@%d): %w", i, d.Width, d.Height, d.PPI, err)
+		}
+		configs[i] = cfg
+	}
+	graphicDeviceConfig.SetDisplays(configs...)
 	return graphicDeviceConfig, nil
 }
 

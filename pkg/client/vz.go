@@ -191,6 +191,14 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		}
 	}
 
+	// Displays are fixed at boot. An invalid annotation fails create; it is not
+	// replaced with the default 1920x1200 display. The Pod is not on
+	// VirtualMachineParams, so the parsed list is threaded through from here.
+	displays, err := resource.Displays(pod)
+	if err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+
 	// Due to the nature of virtual kubelet CreatePod context,
 	// we need to handle the context cancellation on demand ourselves
 	ctx, extras.cancelFunc = context.WithCancel(ctx)
@@ -236,6 +244,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			IgnoreImageCache: pullPolicy == corev1.PullAlways,
 			RegistryCreds:    vmCreds,
 			DataDisks:        dataDiskParams(dataDisks, creds),
+			Displays:         displays,
 		})
 	})
 

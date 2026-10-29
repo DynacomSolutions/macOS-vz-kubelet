@@ -63,7 +63,7 @@ func disableSIPInRecovery(ctx context.Context, o BaseOptions, p config.MacPlatfo
 	if err != nil {
 		return err
 	}
-	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, nil)
+	vmCfg, err := config.NewVirtualMachineConfiguration(ctx, platform, o.CPU, o.MemoryBytes, o.NetworkInterface, nil, nil, nil)
 	if err != nil {
 		return err
 	}
